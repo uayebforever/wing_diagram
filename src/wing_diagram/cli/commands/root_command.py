@@ -2,33 +2,23 @@ import sys
 from argparse import ArgumentParser
 
 from . import version
-from .clan_command import ClanCommand
 from .command import Command
-from .player_command import PlayerCommand
 from .test_command import TestCommand
 from .version import VersionCommand
-from ...config import ClanStatsConfig
-from ...data.retrieval.default_data_retriever import DataRetrieverType
-from ...util.itertools import first
 
 
 class RootCommand(Command):
-    name = "constellation"
-    help = "A tool to manage constellations of nebulae sandboxes."
-    subcommands = [ClanCommand(), VersionCommand(), TestCommand(), PlayerCommand()]
+    name = "wing_diagram"
+    help = "A tool to generate WING mixer routing diagrams."
+    subcommands = [VersionCommand(), TestCommand()]
 
-    def configure_arg_parser(self, parser: ArgumentParser, config: ClanStatsConfig) -> None:
+    def configure_arg_parser(self, parser: ArgumentParser) -> None:
         parser.add_argument(
             "--version",
             action='store_true',
             help="Print version information and exit")
 
-        parser.add_argument('--backend',
-                            choices=list(DataRetrieverType),
-                            default=first(DataRetrieverType),
-                            help="Which python library to use to access the Bungie API")
-
-    def execute(self, args, config):
+    def execute(self, args):
         if args.version:
             version.print_version()
         else:

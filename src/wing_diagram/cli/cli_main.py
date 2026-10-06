@@ -7,7 +7,6 @@ from typing import List
 from .commands.root_command import RootCommand
 from .exit_codes import ExitCode
 from .. import log_config
-from ..config import read_config, ClanStatsConfig
 from ..exceptions import ApplicationError, UserError, ConfigError
 
 log = logging.getLogger(__name__)
@@ -28,8 +27,7 @@ def interrupt_wrapper(unparsed_arguments: List[str]) -> ExitCode:
 
 def main_with_args(unparsed_arguments: List[str]) -> ExitCode:
     try:
-        config = read_config()
-        parsed_arguments = _parse_args(unparsed_arguments, config)
+        parsed_arguments = _parse_args(unparsed_arguments)
     except ConfigError as err:
         print("error with configuration: " + str(err), file=sys.stderr)
         return ExitCode.ARGUMENT_ERROR
@@ -42,13 +40,13 @@ def main_with_args(unparsed_arguments: List[str]) -> ExitCode:
 
     _configure_logging(parsed_arguments, unparsed_arguments)
 
-    return run_application(parsed_arguments, config)
+    return run_application(parsed_arguments)
 
 
-def run_application(parsed_arguments: argparse.Namespace, config: ClanStatsConfig) -> ExitCode:
+def run_application(parsed_arguments: argparse.Namespace) -> ExitCode:
     """Run the business logic for the command found in the arguments"""
     try:
-        parsed_arguments.command_executable(parsed_arguments, config)
+        parsed_arguments.command_executable(parsed_arguments)
     except UserError as err:
         print("User error: " + err.args[0], file=sys.stderr)
         return ExitCode.USER_ERROR
@@ -78,17 +76,17 @@ def _configure_logging(args, unparsed_arguments):
     log.info("Parsed CLI Arguments: %s", args)
 
 
-def _get_arg_parser(config: ClanStatsConfig) -> argparse.ArgumentParser:
+def _get_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="clan-stats", exit_on_error=False)
     root_command = RootCommand()
-    root_command.configure_parsers_and_sub_parsers(parser, config)
+    root_command.configure_parsers_and_sub_parsers(parser)
     parser.set_defaults(global_parser=parser)
 
     return parser
 
 
-def _parse_args(unparsed_arguments: List[str], config: ClanStatsConfig) -> argparse.Namespace:
-    arg_parser = _get_arg_parser(config)
+def _parse_args(unparsed_arguments: List[str]) -> argparse.Namespace:
+    arg_parser = _get_arg_parser()
     return arg_parser.parse_args(unparsed_arguments)
 
 

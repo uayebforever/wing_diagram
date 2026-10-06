@@ -1,17 +1,10 @@
 import random
 import string
-from datetime import datetime, timezone, timedelta
-from enum import Enum, IntEnum
-from functools import partial
-from typing import TypeVar, Type, Callable, Sequence, Optional
+from datetime import datetime, timezone
+from enum import Enum
+from typing import TypeVar, Type, Callable, Sequence
 
-from wing_diagram.data._bungie_api.bungie_enums import MembershipType, CharacterType, GameMode, ClanMemberType
-from wing_diagram.data.types.activities import Activity, ActivityWithPost
-from wing_diagram.data.types.clan import Clan
-from wing_diagram.data.types.individuals import Player, Membership, MinimalPlayer, Character, GroupMinimalPlayer, \
-    MinimalPlayerWithClan
-from wing_diagram.util.itertools import flatten
-from wing_diagram.util.time import now, TimePeriod
+from wing_diagram.util.time import now
 
 _T = TypeVar("_T")
 
