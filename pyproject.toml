@@ -1,0 +1,39 @@
+[project]
+name = "wing_diagram"
+version = "0.1.0"
+description = "WING Mixer diagramming tool"
+requires-python = "~=3.14"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "pydantic",
+    "pydantic_yaml",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+    "types-mock",
+    "tox",
+    "build",
+    "flake8",
+    "basedpyright",
+]
+
+[project.scripts]
+wing_diagram = "wing_diagram.__main__:main"
+
+[project.urls]
+"Homepage" = "https://github.com/pypa/sampleproject"
+"Bug Tracker" = "https://github.com/pypa/sampleproject/issues"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv.sources]

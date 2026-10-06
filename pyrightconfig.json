@@ -1,0 +1,16 @@
+{
+  "include": [
+    "src/clan_stats",
+    "tests_src"
+  ],
+  "extraPaths": [
+    "src",
+    "tests_src"
+  ],
+  "reportAttributeAccessIssue": "none",
+  "reportUnusedParameter": "none",
+  "reportDeprecated": "none",
+  "reportExplicitAny": "none",
+  "reportImplicitOverride": "none",
+  "reportPrivateLocalImportUsage": "none"
+}
