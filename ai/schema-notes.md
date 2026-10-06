@@ -100,3 +100,91 @@ hardcoding per-section counts anywhere.
 - Whether `dir.in`'s small enum is truly fixed, or whether its `items` list
   in `propmap.jsonl` varies by model/firmware (we've only inspected one
   snapshot/propmap pairing so far).
+
+## `bus`/`main`/`mtx` do have an `in` key -- it's just not a source
+
+Confirmed directly (schema-notes previously only said bus has "no
+`in.conn`", which could be read as "no `in` key at all"): `bus.<n>.in`,
+`main.<n>.in`, and `mtx.<n>.in` are all present, but each is just
+`{"set": {"inv", "trim", "bal"}}` -- phase/trim/balance controls on the
+element's own fader strip, no `conn` sub-key, nothing resembling a source.
+Don't let the presence of `in` fool you into thinking these have a single
+upstream source after all.
+
+## `in.conn`'s alt-source pair (`altgrp`/`altin`) can be the *active* one
+
+`ch`/`aux`'s `in.set` has `altsrc` (bool-as-int, "ALT INPUT") alongside
+`srcauto` ("ALT AUTOSW"). `altsrc` is what actually selects, for a given
+snapshot, whether the strip's live source is `conn.{grp,in}` (false) or
+`conn.{altgrp,altin}` (true) -- `routing.py` reads this flag and picks the
+active pair accordingly. `srcauto` governs *automatic* failover to the alt
+source on signal loss, which isn't a property a static snapshot can
+represent either way, so `wing_diagram.routing` ignores it entirely. Not
+exercised by the sample file (`Announcements.snap` has `altsrc: false`
+throughout), so this path is only unit-tested, not validated against real
+console data yet -- worth re-checking against a snapshot that actually uses
+alt sourcing if one turns up.
+
+## `io.out`'s `grp`/`in` is a full patch matrix, not just "carries a main"
+
+Confirmed by both the sample file and `propmap.jsonl`'s enum for e.g.
+`/io/out/LCL/1/grp`: a physical output's source `grp` can be *any* of the
+physical input groups (`LCL`, `AUX`, `A`, `B`, `C`, `SC`, `USB`, `CRD`,
+`MOD`, `PLAY`, `AES`, `USR`, `OSC` -- the exact same vocabulary as
+`io.in`'s own group keys, and as `in.conn.grp`'s physical options) *in
+addition to* `BUS`/`MAIN`/`MTX`/`SEND`/`MON`/`OFF`. So a physical output
+jack can be patched straight from another physical input (hardware
+passthrough, bypassing the mix engine entirely), not only from an internal
+bus/main/matrix -- `wing_diagram.routing` treats `in.conn` and `io.out`
+source resolution as the exact same operation for this reason (see
+`_resolve_source`). Observed in the sample file's active `io.out` entries:
+only `MAIN` and `MON` targets actually appear (e.g. `io.out.LCL.5 ==
+{"grp": "MAIN", "in": 3}`), so the physical-passthrough and `BUS`/`MTX`
+cases are unit-tested but not yet validated against a real snapshot that
+uses them.
+
+## `cfg.mon.*` (monitor/PFL buses) are a real routing destination, deliberately out of scope
+
+`io.out.<grp>.<n>.grp` can be `"MON"`, meaning that physical output jack
+carries a monitor/PFL bus (`cfg.mon.<n>`, aka "PHONES" in the sample file)
+rather than a main/bus/matrix. `cfg.mon.<n>` has its own `src` field (a
+dotted-string enum like `"MAIN.2"`, `"BUS.5"`, `"MTX.3"`, `"AUX.1"` --
+notably a *different* shape from the `{"grp", "in"}` dict used everywhere
+else) selecting what feeds that monitor bus, plus `srcmix`/`dirin` for
+further monitor-specific mixing. The initial plan's description of `cfg`
+("monitor, solo, talkback, etc. -- not routing") already puts this out of
+scope, and `wing_diagram.routing` follows that: `io.out` entries with
+`grp == "MON"` are skipped (no edge emitted, same treatment as `SEND`/FX),
+and `cfg.mon` itself is never visited. This does mean a small number of
+real `io.out` entries (2 of 7 active ones in the sample file) don't appear
+in the diagram at all -- that's intentional, not a bug, but worth knowing
+if the rendered graph looks like it's missing an output you expected to
+see.
+
+## Node/edge inclusion rule actually used by `wing_diagram.routing`
+
+The initial plan said "active routes only" about *edges*; `build_routing_graph`
+extends the same idea to *nodes*: a node (physical I/O, channel, bus, main,
+or matrix) is only included in the `RoutingGraph` if it's an endpoint of at
+least one active edge. A physical input that's never patched anywhere, or a
+channel that's fully off (`in.conn.grp == "OFF"` and no active
+`main`/`send`), is omitted entirely rather than shown as a disconnected
+box -- this keeps the diagram legible given how many physical I/O
+instances a real console has (e.g. 48 AES50-A inputs, most unused in any
+given snapshot). If a future pass wants an "show everything" mode, this is
+the rule to make configurable.
+
+## Group-code display labels are resolved via propmap, not hardcoded
+
+`wing_diagram.routing._group_label` resolves a group code (e.g. `"LCL"`,
+`"MON"`) to its on-console label (e.g. `"LOCAL IN"`, `"MONITOR"`) by
+calling `PropMap.resolve()` against a fixed path
+(`io/out/LCL/1/grp`) chosen because its enum happens to be the superset of
+every group code the routing/render code needs a label for (physical I/O
+groups plus `BUS`/`MAIN`/`MTX`/`SEND`/`MON`/`OFF`). This is a bit of an
+implicit assumption -- that this one path's enum `items` list is
+representative of the shared `grp` vocabulary used elsewhere -- which held
+for the one snapshot/propmap pairing inspected so far. If a future
+model/firmware's propmap ever turns out to vary this enum per-path (unlike
+the "Model-dependent sub-blocks" case above, nothing currently suggests it
+does), this helper would need a fallback.
