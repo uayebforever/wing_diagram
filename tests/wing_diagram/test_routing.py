@@ -106,8 +106,10 @@ def test_build_routing_graph_against_real_sample() -> None:
     assert ("io_out", "LCL", 1) not in nodes_by_id
     assert not any(e.dest == ("io_out", "LCL", 1) for e in graph.edges)
 
-    # ch 1's preamp (on the physical input, not the channel) is at unity.
-    assert nodes_by_id[("io_in", "LCL", 1)].detail == ("preamp +0.0 dB",)
+    # A named physical input also shows its hardware designation (the
+    # label an unnamed jack would fall back to) alongside its preamp gain
+    # (on the physical input, not the channel; at unity here).
+    assert nodes_by_id[("io_in", "LCL", 1)].detail == ("LOCAL IN 1", "preamp +0.0 dB")
 
     # ch 1 has an active Comp (no Gate); the badge resolves `mdl`'s enum
     # value through the propmap and includes threshold/make-up gain.
@@ -360,7 +362,25 @@ def test_preamp_gain_shown_on_io_in_node(tmp_path: Path) -> None:
     graph = build_routing_graph(_snapshot(ae_data), propmap)
 
     nodes_by_id = {node.id: node for node in graph.nodes}
-    assert nodes_by_id[("io_in", "LCL", 1)].detail == ("preamp +32.5 dB",)
+    assert nodes_by_id[("io_in", "LCL", 1)].detail == ("LOCAL IN 1", "preamp +32.5 dB")
+
+
+def test_unnamed_io_in_does_not_duplicate_hardware_label(tmp_path: Path) -> None:
+    """An unnamed physical input's `label` already *is* the hardware
+    designation (e.g. "LOCAL IN 2") -- it shouldn't also repeat as a
+    detail line."""
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "io": {"in": {"LCL": {"2": {"g": 10}}}},
+        "ch": {"1": {"name": "", "in": {"conn": {"grp": "LCL", "in": 2}}}},
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    nodes_by_id = {node.id: node for node in graph.nodes}
+    node = nodes_by_id[("io_in", "LCL", 2)]
+    assert node.label == "LOCAL IN 2"
+    assert node.detail == ("preamp +10.0 dB",)
 
 
 def test_input_trim_shown_on_edge_when_nonzero(tmp_path: Path) -> None:

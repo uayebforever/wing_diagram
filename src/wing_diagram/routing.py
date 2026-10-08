@@ -351,8 +351,12 @@ def _make_node(node_id: NodeId, ae: dict[str, Any], propmap: PropMap) -> Node:
         _, grp, index = cast("tuple[str, str, int]", node_id)
         section = "in" if kind == "io_in" else "out"
         data = (((ae.get("io") or {}).get(section) or {}).get(grp) or {}).get(str(index)) or {}
-        label = data.get("name") or f"{_io_group_label(propmap, section, grp)} {index}"
-        detail = _preamp_gain_detail(data) if kind == "io_in" else ()
+        hw_label = f"{_io_group_label(propmap, section, grp)} {index}"
+        own_name = data.get("name")
+        label = own_name or hw_label
+        detail = ((hw_label,) if kind == "io_in" and own_name else ()) + (
+            _preamp_gain_detail(data) if kind == "io_in" else ()
+        )
         return Node(id=node_id, kind=kind, label=label, detail=detail)
 
     _, index = cast("tuple[str, int]", node_id)
