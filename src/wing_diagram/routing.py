@@ -87,8 +87,8 @@ def build_routing_graph(snapshot: Snapshot, propmap: PropMap) -> RoutingGraph:
         touched.add(node_id)
         return node_id
 
-    def add_edge(source: NodeId, dest: NodeId) -> None:
-        edges.append(Edge(touch(source), touch(dest)))
+    def add_edge(source: NodeId, dest: NodeId, meta: dict[str, Any] | None = None) -> None:
+        edges.append(Edge(touch(source), touch(dest), meta or {}))
 
     for section in _SINGLE_SOURCE_SECTIONS:
         for index, data in _section_items(ae, section):
@@ -102,9 +102,11 @@ def build_routing_graph(snapshot: Snapshot, propmap: PropMap) -> RoutingGraph:
             _add_sends(data, (section, index), add_edge)
 
     for out_grp, index, data in _io_out_entries(ae):
-        source_id = _resolve_source(data)
-        if source_id is not None:
-            add_edge(source_id, ("io_out", out_grp, index))
+        resolved = _resolve_output_source(data)
+        if resolved is not None:
+            source_id, channel = resolved
+            meta = {"channel": channel} if channel is not None else None
+            add_edge(source_id, ("io_out", out_grp, index), meta)
 
     nodes = [_make_node(node_id, ae, propmap) for node_id in touched]
     nodes.sort(key=lambda n: (_KIND_ORDER.get(n.kind, 99), n.id))
@@ -146,12 +148,15 @@ def _active_conn(data: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _resolve_source(conn: dict[str, Any]) -> NodeId | None:
-    """Resolve a `{"grp": ..., "in": ...}`-shaped connection to a `NodeId`.
+    """Resolve an `in.conn`-shaped `{"grp": ..., "in": ...}` to a `NodeId`.
 
-    Shared by `in.conn` (on `ch`/`aux`) and `io.out.<grp>.<n>` entries --
-    both use the same `grp` vocabulary (physical I/O groups plus
-    `BUS`/`MAIN`/`MTX` internal re-patch targets, and a couple of
-    out-of-scope targets). See `ai/schema-notes.md`.
+    `grp` is either a physical I/O group or an internal re-patch target
+    (`BUS`/`MAIN`/`MTX`), in which case `in` addresses that element
+    directly (bus/main/mtx are stereo throughout the signal path up to
+    this point, so re-patching into a channel strip picks up the whole
+    stereo element, same as `cfg.mon.*.src`'s `"BUS.<n>"`-style source
+    enum does) -- *not* the flattened L/R tap numbering `io.out` uses
+    (see `_resolve_output_source`). See `ai/schema-notes.md`.
     """
     grp = conn.get("grp")
     index = conn.get("in")
@@ -164,8 +169,42 @@ def _resolve_source(conn: dict[str, Any]) -> NodeId | None:
     return ("io_in", grp, int(index))
 
 
+def _resolve_output_source(conn: dict[str, Any]) -> tuple[NodeId, str | None] | None:
+    """Resolve an `io.out.<grp>.<n>`-shaped `{"grp": ..., "in": ...}`.
+
+    Physical output jacks are mono, so when `grp` is an internal re-patch
+    target (`BUS`/`MAIN`/`MTX`), `in` is *not* that element's own index --
+    it's a flat 1-based tap number across a fixed 2 taps (L, R) per
+    element, in element order, regardless of whether the element itself
+    is actually configured mono or stereo (`<section>.<n>.busmono`): a
+    mono-downmixed main still reserves and duplicates its signal across
+    both taps. E.g. tap 3 is always "element 2, L" whether that element
+    is a stereo or a (down-mixed) mono main/bus/mtx. Confirmed against a
+    real snapshot where a mono main's *second* tap (R) was the one
+    actually patched out -- see `ai/schema-notes.md`.
+
+    Returns `(node_id, channel)` where `channel` is `"L"`/`"R"` for an
+    internal re-patch tap, or `None` for a physical passthrough (no
+    channel-split concept there).
+    """
+    grp = conn.get("grp")
+    tap = conn.get("in")
+    if not grp or grp == "OFF" or tap is None:
+        return None
+    if grp in _INTERNAL_SOURCE_KINDS:
+        tap = int(tap)
+        element_index = (tap - 1) // 2 + 1
+        channel = "L" if (tap - 1) % 2 == 0 else "R"
+        return (_INTERNAL_SOURCE_KINDS[grp], element_index), channel
+    if grp in _OUT_OF_SCOPE_SOURCE_GROUPS:
+        return None
+    return ("io_in", grp, int(tap)), None
+
+
 def _add_sends(
-    data: dict[str, Any], source_id: NodeId, add_edge: Callable[[NodeId, NodeId], None]
+    data: dict[str, Any],
+    source_id: NodeId,
+    add_edge: Callable[[NodeId, NodeId, dict[str, Any] | None], None],
 ) -> None:
     """Emit edges for every active `main.{1-4}` / `send.{1-16,MX1-8}` target.
 
@@ -177,14 +216,14 @@ def _add_sends(
     """
     for key, target in (data.get("main") or {}).items():
         if target.get("on"):
-            add_edge(source_id, ("main", int(key)))
+            add_edge(source_id, ("main", int(key)), None)
     for key, target in (data.get("send") or {}).items():
         if not target.get("on"):
             continue
         if key.startswith("MX"):
-            add_edge(source_id, ("mtx", int(key[2:])))
+            add_edge(source_id, ("mtx", int(key[2:])), None)
         else:
-            add_edge(source_id, ("bus", int(key)))
+            add_edge(source_id, ("bus", int(key)), None)
 
 
 def _make_node(node_id: NodeId, ae: dict[str, Any], propmap: PropMap) -> Node:

@@ -42,10 +42,15 @@ class GraphvizRenderer(Renderer):
     """Renders a `RoutingGraph` as a left-to-right Graphviz diagram.
 
     Basic v1 implementation: one box per node, colored by kind, laid out
-    left-to-right by rank group (see `_RANK_GROUPS`). No edge labels yet
-    (`Edge.meta` isn't used) -- this exists mainly to let the routing graph
-    be eyeballed against the real console; refine the visuals separately
-    once the routing side is validated.
+    left-to-right by rank group (see `_RANK_GROUPS`). Edges carry a label
+    only when `Edge.meta["channel"]` is set -- currently just the L/R tap
+    an `io.out` edge was patched from when its source is a stereo
+    bus/main/mtx (see `wing_diagram.routing._resolve_output_source`);
+    every other edge (channel/aux/bus sends, physical passthrough) is a
+    full stereo-to-stereo or mono-to-mono connection with nothing to
+    disambiguate, so it's left unlabeled. This exists mainly to let the
+    routing graph be eyeballed against the real console; refine the
+    visuals separately once the routing side is validated.
     """
 
     def __init__(self, format: str | None = None) -> None:
@@ -89,7 +94,13 @@ class GraphvizRenderer(Renderer):
                     )
 
         for edge in graph.edges:
-            dot.edge(_dot_node_id(edge.source), _dot_node_id(edge.dest))
+            channel = edge.meta.get("channel")
+            dot.edge(
+                _dot_node_id(edge.source),
+                _dot_node_id(edge.dest),
+                label=channel if channel else "",
+                fontsize="10",
+            )
 
         return dot
 

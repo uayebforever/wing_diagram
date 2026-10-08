@@ -135,13 +135,55 @@ physical input groups (`LCL`, `AUX`, `A`, `B`, `C`, `SC`, `USB`, `CRD`,
 addition to* `BUS`/`MAIN`/`MTX`/`SEND`/`MON`/`OFF`. So a physical output
 jack can be patched straight from another physical input (hardware
 passthrough, bypassing the mix engine entirely), not only from an internal
-bus/main/matrix -- `wing_diagram.routing` treats `in.conn` and `io.out`
-source resolution as the exact same operation for this reason (see
-`_resolve_source`). Observed in the sample file's active `io.out` entries:
-only `MAIN` and `MON` targets actually appear (e.g. `io.out.LCL.5 ==
-{"grp": "MAIN", "in": 3}`), so the physical-passthrough and `BUS`/`MTX`
-cases are unit-tested but not yet validated against a real snapshot that
-uses them.
+bus/main/matrix. `wing_diagram.routing._resolve_output_source` shares the
+physical-group half of this resolution with `in.conn`'s
+`_resolve_source`, but **not** the internal-re-patch half -- see the next
+note, which corrects an earlier (wrong) version of this note that assumed
+they were identical.
+
+## `io.out`'s internal-source `in` is a flattened L/R tap index, not the element's own index
+
+This one actually produced a wrong diagram in an earlier pass, caught by
+eyeballing the rendered output against the real console: every mixer
+element with a stereo signal path (`ch`, `aux`, `bus`, `main`, `mtx` --
+all of them, confirmed via each section's own `busmono` field, which lets
+*any* of them be downmixed to mono without changing this) occupies
+exactly **2** taps in `io.out`'s source numbering for `BUS`/`MAIN`/`MTX`,
+always, regardless of that element's own `busmono` setting: tap `1` is
+element 1's L, tap `2` is element 1's R, tap `3` is element 2's L, and so
+on -- `element = (tap - 1) // 2 + 1`, `channel = "L" if (tap - 1) % 2 ==
+0 else "R"`. A mono-downmixed element still reserves both taps (just with
+the same signal duplicated onto each), so even its "R" tap is a valid,
+meaningful patch target.
+
+Confirmed against `Announcements.snap`: `main.1` ("Sanctuary Mix") has
+`busmono: true`; `main.2` ("Stream Mix") has `busmono: false`. The active
+`io.out` entries are `io.out.LCL.5 == {"grp": "MAIN", "in": 3}`,
+`io.out.LCL.6 == {"grp": "MAIN", "in": 4}`, `io.out.LCL.8 == {"grp":
+"MAIN", "in": 2}`. Naively treating `in` as the main's own index (1-4)
+would read this as "main 2 → LCL 5, main 3 → LCL 6, main 4 → LCL 8" --
+wrong, and an earlier version of `wing_diagram.routing` did exactly that.
+Under the tap formula it's "main 1 R → LCL 8, main 2 L → LCL 5, main 2 R →
+LCL 6" -- i.e. Sanctuary Mix (mono) on LCL 8, Stream Mix (stereo) split
+across LCL 5 (L) / LCL 6 (R). That's what the console is actually
+configured to do.
+
+By contrast, `in.conn` (`ch`/`aux` re-patching from `BUS`/`MAIN`/`MTX`)
+and `cfg.mon.<n>.src` (whose enum lists exactly 16 `BUS.<n>`/4
+`MAIN.<n>`/8 `MTX.<n>` items, not 32/8/16) both address the element
+directly by its own 1-based index, picking up the whole stereo element
+rather than a single mono tap -- that makes sense, since both of those
+targets are themselves stereo-capable (another channel strip; a stereo
+headphone/monitor output), unlike a physical output jack which is mono
+and must pick a side. So `wing_diagram.routing` has two separate
+resolvers: `_resolve_source` (direct index, for `in.conn`) and
+`_resolve_output_source` (flattened tap, for `io.out`) -- don't
+accidentally reunify them.
+
+`Edge.meta["channel"]` (`"L"`/`"R"`) now carries this for `io.out` edges
+sourced from an internal element, and `GraphvizRenderer` draws it as an
+edge label, so the rendered diagram shows which side of a stereo
+bus/main/mtx actually reached a given physical output.
 
 ## `cfg.mon.*` (monitor/PFL buses) are a real routing destination, deliberately out of scope
 

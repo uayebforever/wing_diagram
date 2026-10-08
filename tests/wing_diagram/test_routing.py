@@ -81,12 +81,20 @@ def test_build_routing_graph_against_real_sample() -> None:
     assert Edge(("bus", 1), ("ch", 13)) in graph.edges
 
     # Physical outputs carrying mains (direct patch, not via io.in).
-    assert Edge(("main", 3), ("io_out", "LCL", 5)) in graph.edges
-    assert Edge(("main", 4), ("io_out", "LCL", 6)) in graph.edges
-    assert Edge(("main", 2), ("io_out", "LCL", 8)) in graph.edges
+    # `io.out`'s `in` is a flat 1-based L/R tap number -- 2 taps per main,
+    # always, regardless of that main's own mono/stereo setting -- not the
+    # main's own index. main 1 ("Sanctuary Mix") is mono-downmixed but
+    # still occupies taps 1 and 2; its R tap (2) is the one actually
+    # patched out to LCL 8. main 2 ("Stream Mix") is genuinely stereo,
+    # occupying taps 3 (L) and 4 (R), patched to LCL 5 and LCL 6
+    # respectively. See `ai/schema-notes.md`.
+    assert Edge(("main", 1), ("io_out", "LCL", 8), {"channel": "R"}) in graph.edges
+    assert Edge(("main", 2), ("io_out", "LCL", 5), {"channel": "L"}) in graph.edges
+    assert Edge(("main", 2), ("io_out", "LCL", 6), {"channel": "R"}) in graph.edges
 
-    # Mains with blank names fall back to a generic label.
-    assert nodes_by_id[("main", 3)].label == "Main 3"
+    # main 3/4 are blank-named and untouched by any edge in this sample.
+    assert ("main", 3) not in nodes_by_id
+    assert ("main", 4) not in nodes_by_id
 
     # Outputs carrying the out-of-scope MON bus are not modelled as edges,
     # and the physical inputs that *only* feed MON (never used elsewhere)
@@ -219,6 +227,42 @@ def test_io_out_direct_physical_passthrough(tmp_path: Path) -> None:
     graph = build_routing_graph(_snapshot(ae_data), propmap)
 
     assert Edge(("io_in", "USB", 1), ("io_out", "LCL", 3)) in graph.edges
+
+
+def test_io_out_internal_source_uses_flattened_lr_taps(tmp_path: Path) -> None:
+    """`io.out`'s `in`, for an internal re-patch `grp`, is a flat 1-based
+    L/R tap number (2 taps per element, always) -- not that element's own
+    index. Taps 1-2 are element 1 (L, R), taps 3-4 are element 2 (L, R),
+    etc. This holds even for a mono-downmixed element: it still reserves
+    (and duplicates its signal across) both taps. Mirrors the real
+    "Sanctuary Mix" (mono main 1, patched out via its R tap) / "Stream
+    Mix" (stereo main 2, L and R both patched out) case in
+    `Announcements.snap`. See `ai/schema-notes.md`.
+    """
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "io": {
+            "out": {
+                "LCL": {
+                    "1": {"grp": "MAIN", "in": 1},  # main 1, L
+                    "2": {"grp": "MAIN", "in": 2},  # main 1, R
+                    "3": {"grp": "MAIN", "in": 3},  # main 2, L
+                    "4": {"grp": "MAIN", "in": 4},  # main 2, R
+                    "5": {"grp": "BUS", "in": 5},  # bus 3, L
+                    "6": {"grp": "MTX", "in": 1},  # mtx 1, L
+                }
+            }
+        }
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    assert Edge(("main", 1), ("io_out", "LCL", 1), {"channel": "L"}) in graph.edges
+    assert Edge(("main", 1), ("io_out", "LCL", 2), {"channel": "R"}) in graph.edges
+    assert Edge(("main", 2), ("io_out", "LCL", 3), {"channel": "L"}) in graph.edges
+    assert Edge(("main", 2), ("io_out", "LCL", 4), {"channel": "R"}) in graph.edges
+    assert Edge(("bus", 3), ("io_out", "LCL", 5), {"channel": "L"}) in graph.edges
+    assert Edge(("mtx", 1), ("io_out", "LCL", 6), {"channel": "L"}) in graph.edges
 
 
 def test_unnamed_io_out_falls_back_to_group_label(tmp_path: Path) -> None:
