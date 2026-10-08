@@ -216,17 +216,36 @@ instances a real console has (e.g. 48 AES50-A inputs, most unused in any
 given snapshot). If a future pass wants an "show everything" mode, this is
 the rule to make configurable.
 
-## Group-code display labels are resolved via propmap, not hardcoded
+## Two different, easily-confused meanings of a group code's "label"
 
-`wing_diagram.routing._group_label` resolves a group code (e.g. `"LCL"`,
-`"MON"`) to its on-console label (e.g. `"LOCAL IN"`, `"MONITOR"`) by
-calling `PropMap.resolve()` against a fixed path
-(`io/out/LCL/1/grp`) chosen because its enum happens to be the superset of
-every group code the routing/render code needs a label for (physical I/O
-groups plus `BUS`/`MAIN`/`MTX`/`SEND`/`MON`/`OFF`). This is a bit of an
-implicit assumption -- that this one path's enum `items` list is
-representative of the shared `grp` vocabulary used elsewhere -- which held
-for the one snapshot/propmap pairing inspected so far. If a future
-model/firmware's propmap ever turns out to vary this enum per-path (unlike
-the "Model-dependent sub-blocks" case above, nothing currently suggests it
-does), this helper would need a fallback.
+There are two unrelated propmap lookups that both turn a group code like
+`"LCL"` into a human label, and conflating them is a bug that actually
+shipped once (physical output jacks rendered as "LOCAL IN 8" instead of
+"LOCAL OUT 8"):
+
+1. **What a `grp` *value* means, when selecting a source.** This is the
+   shared enum on fields like `in.conn.grp` or `io.out.<grp>.<n>.grp`
+   (e.g. `/io/out/LCL/1/grp`'s `items` list). It's **direction-agnostic**:
+   `"LCL"` is always `"LOCAL IN"` here, *even when it's naming the source
+   patched into a physical output* -- because what's being named is the
+   source location, and the Local bank's inputs are what you'd be
+   tapping. `PropMap.resolve("io/out/LCL/1/grp", "LCL")` (or any
+   equivalent path -- the enum is identical everywhere this field
+   appears) gives this.
+2. **What the `io.<section>.<grp>` bank is itself called**, as a
+   container -- e.g. `/io/in/LCL` has `longname: "LOCAL IN"` but
+   `/io/out/LCL` has `longname: "LOCAL OUT"`. This **is**
+   direction-specific (so is `/io/in/AUX` "AUX IN" vs `/io/out/AUX` "AUX
+   OUT"; a few groups coincidentally share a label either way, e.g. `A`
+   "AES50 A"). `PropMap.describe(f"io/{section}/{grp}").display_name`
+   gives this.
+
+`wing_diagram.routing._io_group_label` uses (2), via `PropMap.describe`,
+specifically to label an *unnamed physical jack's own node* (e.g.
+fallback label `"LOCAL OUT 8"` for an `io.out.LCL.8` entry with no
+`name`). An earlier version used (1) for this by mistake (reusing the
+`grp`-*value* enum to describe the jack bank itself), which is how every
+unnamed output ended up labelled "LOCAL IN n" regardless of whether it
+was actually an input or output. `_resolve_source`/`_resolve_output_source`
+correctly use (1) -- they're actually interpreting a `grp` *value* naming
+a source, not labelling a bank.

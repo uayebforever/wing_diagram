@@ -33,14 +33,6 @@ _INTERNAL_SOURCE_KINDS = {"BUS": "bus", "MAIN": "main", "MTX": "mtx"}
 #:   the initial plan already classifies as "not routing".
 _OUT_OF_SCOPE_SOURCE_GROUPS = frozenset({"SEND", "MON"})
 
-#: A `propmap.jsonl` path whose `grp`-type enum happens to be the superset
-#: of every group code we need a display label for (physical I/O groups
-#: plus BUS/MAIN/MTX/SEND/MON) -- see `ai/schema-notes.md` "`io.out` has
-#: more destination kinds than the initial plan covered". Used purely to
-#: resolve a group *code* (e.g. `"LCL"`) to its on-console label (e.g.
-#: `"LOCAL IN"`), independent of any particular node's data.
-_GROUP_LABEL_PROPMAP_PATH = "io/out/LCL/1/grp"
-
 _KIND_LABELS = {"ch": "Ch", "aux": "Aux", "bus": "Bus", "main": "Main", "mtx": "Mtx"}
 
 #: Left-to-right rank order for node kinds, matching the signal-flow layout
@@ -232,7 +224,7 @@ def _make_node(node_id: NodeId, ae: dict[str, Any], propmap: PropMap) -> Node:
         _, grp, index = cast("tuple[str, str, int]", node_id)
         section = "in" if kind == "io_in" else "out"
         data = (((ae.get("io") or {}).get(section) or {}).get(grp) or {}).get(str(index)) or {}
-        label = data.get("name") or f"{_group_label(propmap, grp)} {index}"
+        label = data.get("name") or f"{_io_group_label(propmap, section, grp)} {index}"
         return Node(id=node_id, kind=kind, label=label)
 
     _, index = cast("tuple[str, int]", node_id)
@@ -250,6 +242,20 @@ def _make_node(node_id: NodeId, ae: dict[str, Any], propmap: PropMap) -> Node:
     return Node(id=node_id, kind=kind, label=f"{_KIND_LABELS[kind]} {index}")
 
 
-def _group_label(propmap: PropMap, grp: str) -> str:
-    resolved = propmap.resolve(_GROUP_LABEL_PROPMAP_PATH, grp)
-    return resolved if isinstance(resolved, str) else grp
+def _io_group_label(propmap: PropMap, section: str, grp: str) -> str:
+    """Display label for an `io.<section>.<grp>` bank itself (e.g. `"LCL"`
+    under `io.out` -> `"LOCAL OUT"`), used as a fallback for an unnamed
+    physical jack's node label (`"LOCAL OUT 8"`).
+
+    Deliberately *not* the shared `grp`-value enum (e.g. `in.conn.grp`'s
+    item list) that `_resolve_source`/`_resolve_output_source` read --
+    that enum names what a `grp` *value* means when selecting a source
+    (direction-agnostic: `"LCL"` there is always `"LOCAL IN"`, even when
+    it's selecting the source for a physical *output*), which is a
+    different question from what the `io.<section>.<grp>` bank is
+    *itself* called. `/io/in/LCL` and `/io/out/LCL` have their own,
+    direction-correct `longname`s (`"LOCAL IN"` vs `"LOCAL OUT"`) --
+    conflating the two was a bug (see `ai/schema-notes.md`).
+    """
+    entry = propmap.describe(f"io/{section}/{grp}")
+    return entry.display_name if entry is not None else grp

@@ -9,40 +9,33 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SAMPLE_SNAP = _REPO_ROOT / "wing_snaps" / "Announcements.snap"
 _SAMPLE_PROPMAP = _REPO_ROOT / "src" / "wing_diagram" / "propmap.jsonl"
 
-_GROUP_LABELS = {
-    "OFF": "OFF",
-    "LCL": "LOCAL IN",
-    "AUX": "AUX IN",
-    "A": "AES50 A",
-    "B": "AES50 B",
-    "C": "AES50 C",
-    "SC": "ST CONNECT",
-    "USB": "USB AUDIO",
-    "CRD": "WLIVE PLAY",
-    "MOD": "MODULE",
-    "PLAY": "USB PLAYER",
-    "AES": "AES/EBU IN",
-    "USR": "USER SIGNAL",
-    "OSC": "OSCILLATOR",
-    "BUS": "BUS",
-    "MAIN": "MAIN",
-    "MTX": "MATRIX",
-    "SEND": "FX SEND",
-    "MON": "MONITOR",
-}
+#: `io.<section>.<grp>` bank container labels -- direction-specific (e.g.
+#: `LCL` is "LOCAL IN" under `io.in` but "LOCAL OUT" under `io.out`), unlike
+#: the shared `grp`-*value* enum used elsewhere (`in.conn.grp`,
+#: `io.out.*.grp`) where "LCL" always means "LOCAL IN" regardless of
+#: direction. See `ai/schema-notes.md`.
+_IN_GROUP_LABELS = {"LCL": "LOCAL IN", "A": "AES50 A", "USB": "USB AUDIO"}
+_OUT_GROUP_LABELS = {"LCL": "LOCAL OUT", "A": "AES50 A"}
 
 
 def _write_minimal_propmap(path: Path) -> Path:
-    """A propmap with just enough to resolve `io/out/LCL/1/grp` group labels."""
-    entry = {
-        "id": 1,
-        "name": "grp",
-        "type": "string enum",
-        "items": [{"item": k, "longitem": v} for k, v in _GROUP_LABELS.items()],
-        "fullname": "/io/out/LCL/1/grp",
-    }
+    """A propmap with just enough `io.in`/`io.out` bank-container entries
+    for `_io_group_label`'s fallback-label lookups in the tests below."""
+    entries = [
+        {"id": i, "name": grp, "longname": longname, "type": "node", "fullname": f"/io/in/{grp}"}
+        for i, (grp, longname) in enumerate(_IN_GROUP_LABELS.items())
+    ] + [
+        {
+            "id": 100 + i,
+            "name": grp,
+            "longname": longname,
+            "type": "node",
+            "fullname": f"/io/out/{grp}",
+        }
+        for i, (grp, longname) in enumerate(_OUT_GROUP_LABELS.items())
+    ]
     propmap_path = path / "propmap.jsonl"
-    propmap_path.write_text(json.dumps(entry) + "\n")
+    propmap_path.write_text("\n".join(json.dumps(entry) for entry in entries) + "\n")
     return propmap_path
 
 
@@ -91,6 +84,12 @@ def test_build_routing_graph_against_real_sample() -> None:
     assert Edge(("main", 1), ("io_out", "LCL", 8), {"channel": "R"}) in graph.edges
     assert Edge(("main", 2), ("io_out", "LCL", 5), {"channel": "L"}) in graph.edges
     assert Edge(("main", 2), ("io_out", "LCL", 6), {"channel": "R"}) in graph.edges
+
+    # Physical output jacks are labelled from the direction-specific
+    # io.out.LCL bank ("LOCAL OUT"), not the direction-agnostic grp-value
+    # enum ("LOCAL IN") that in.conn/io.out's own `grp` field shares with
+    # io.in -- see ai/schema-notes.md.
+    assert nodes_by_id[("io_out", "LCL", 8)].label == "LOCAL OUT 8"
 
     # main 3/4 are blank-named and untouched by any edge in this sample.
     assert ("main", 3) not in nodes_by_id
@@ -277,6 +276,23 @@ def test_unnamed_io_out_falls_back_to_group_label(tmp_path: Path) -> None:
     nodes_by_id = {node.id: node for node in graph.nodes}
     assert nodes_by_id[("io_out", "A", 12)].label == "AES50 A 12"
     assert nodes_by_id[("main", 1)].label == "Main 1"
+
+
+def test_unnamed_io_in_and_io_out_use_direction_specific_group_label(tmp_path: Path) -> None:
+    """Regression test: an earlier version resolved an unnamed physical
+    jack's fallback label via the shared `grp`-*value* enum (which is
+    direction-agnostic -- "LCL" always means "LOCAL IN" there, even for
+    an output), producing output jacks mislabeled "LOCAL IN n". The bank
+    itself is direction-specific: `io.in.LCL` is "LOCAL IN",
+    `io.out.LCL` is "LOCAL OUT". See `ai/schema-notes.md`.
+    """
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {"io": {"out": {"LCL": {"3": {"grp": "USB", "in": 1}}}}}
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    nodes_by_id = {node.id: node for node in graph.nodes}
+    assert nodes_by_id[("io_out", "LCL", 3)].label == "LOCAL OUT 3"
 
 
 def test_node_and_edge_ordering_is_deterministic(tmp_path: Path) -> None:
