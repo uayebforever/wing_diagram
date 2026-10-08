@@ -4,11 +4,19 @@ from pathlib import Path
 
 from .command import Command
 from ...propmap import PropMap, default_propmap_path
-from ...render import GraphvizRenderer
+from ...render import GraphvizRenderer, MermaidRenderer, Renderer
 from ...routing import build_routing_graph
 from ...snapfile import load_snapshot
 
 log = getLogger(__name__)
+
+#: Default output path per `--renderer` choice, used when `--out` isn't
+#: given -- Graphviz renders straight to an image, Mermaid writes its own
+#: diagram source (see `MermaidRenderer`).
+_DEFAULT_OUT_BY_RENDERER = {
+    "graphviz": Path("routing.svg"),
+    "mermaid": Path("routing.mmd"),
+}
 
 
 class RoutingCommand(Command):
@@ -21,8 +29,15 @@ class RoutingCommand(Command):
             "-o",
             "--out",
             type=Path,
-            default=Path("routing.svg"),
-            help="Output path for the rendered diagram (default: routing.svg)",
+            default=None,
+            help="Output path for the rendered diagram "
+            "(default: routing.svg for --renderer graphviz, routing.mmd for --renderer mermaid)",
+        )
+        parser.add_argument(
+            "--renderer",
+            choices=sorted(_DEFAULT_OUT_BY_RENDERER),
+            default="mermaid",
+            help="Diagram renderer to use (default: mermaid)",
         )
         parser.add_argument(
             "--propmap",
@@ -36,7 +51,10 @@ class RoutingCommand(Command):
         propmap = PropMap.load(args.propmap or default_propmap_path())
         graph = build_routing_graph(snapshot, propmap)
 
-        renderer = GraphvizRenderer()
-        out_path = renderer.render(graph, args.out)
+        renderer: Renderer = (
+            GraphvizRenderer() if args.renderer == "graphviz" else MermaidRenderer()
+        )
+        out = args.out or _DEFAULT_OUT_BY_RENDERER[args.renderer]
+        out_path = renderer.render(graph, out)
         log.info("Routing graph: %d nodes, %d edges", len(graph.nodes), len(graph.edges))
         print(f"Wrote routing diagram to {out_path}")
