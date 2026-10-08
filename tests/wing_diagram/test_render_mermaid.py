@@ -138,3 +138,42 @@ def test_render_does_not_duplicate_bare_fallback_label(tmp_path: Path) -> None:
 
     assert "Ch 5: Ch 5" not in content
     assert "Ch 5" in content
+
+
+def test_render_declares_nodes_in_the_graphs_given_order() -> None:
+    """Node *declaration* order is what `elk.forceNodeModelOrder` (see
+    `MermaidRenderer`) preserves as the final top-to-bottom layout order --
+    so `_build_mermaid` must declare nodes in `graph.nodes`' given order
+    (which `routing.build_routing_graph` already sorts ascending by index)
+    rather than reordering them itself."""
+    graph = RoutingGraph(
+        nodes=[
+            Node(id=("ch", 1), kind="ch", label="Wren"),
+            Node(id=("ch", 7), kind="ch", label="Ambient"),
+            Node(id=("ch", 13), kind="ch", label="Speakers"),
+            Node(id=("io_in", "LCL", 1), kind="io_in", label="Wren"),
+            Node(id=("io_in", "LCL", 9), kind="io_in", label="Choir Solo"),
+        ],
+        edges=[],
+    )
+
+    content = MermaidRenderer()._build_mermaid(graph)
+
+    assert content.index("n_ch_1[") < content.index("n_ch_7[") < content.index("n_ch_13[")
+    assert content.index("n_io_in_LCL_1[") < content.index("n_io_in_LCL_9[")
+
+
+def test_render_does_not_wrap_nodes_in_subgraphs() -> None:
+    """A Mermaid `subgraph` is its own nested ELK layout problem and was
+    observed to silently stop `forceNodeModelOrder` from applying to the
+    nodes inside it -- see `MermaidRenderer`'s docstring."""
+    content = MermaidRenderer()._build_mermaid(_sample_graph())
+
+    assert "subgraph" not in content
+
+
+def test_render_sets_elk_model_order_options() -> None:
+    content = MermaidRenderer()._build_mermaid(_sample_graph())
+
+    assert "forceNodeModelOrder: true" in content
+    assert "preset: modelOrder" in content

@@ -207,8 +207,22 @@ class MermaidRenderer(Renderer):
     they share an end".
 
     Node kinds keep the same fill/stroke colors as `GraphvizRenderer` (via
-    `classDef`/`class`), and nodes are grouped into the same left-to-right
-    `_RANK_GROUPS` subgraphs to keep the signal-flow layout.
+    `classDef`/`class`), and nodes are declared in the same left-to-right
+    `_RANK_GROUPS` order to keep the signal-flow layout -- as a declaration
+    order rather than a Mermaid `subgraph`, since ELK treats a `subgraph` as
+    its own nested layout problem and silently stops respecting node order
+    inside it (see `elk.forceNodeModelOrder` below).
+
+    `elk.forceNodeModelOrder` (+ the `modelOrder` preset) keeps nodes within
+    a layer in declaration order -- i.e. ascending by index, since
+    `graph.nodes` already comes pre-sorted that way -- rather than ELK's
+    default crossing-minimization reordering them freely. This also happens
+    to be what keeps a signal-in edge and a signal-out edge from ever
+    landing on the same side of a node: ELK's free reordering was what let
+    e.g. a monitor-feed edge (bus/main/mtx back into a channel) and a
+    sidechain "key" edge end up sharing a node's east side, making the two
+    arrowheads ambiguous; with model order enforced, a same-layer edge like
+    a key tap instead routes via the node's north/south side.
 
     A node's label is rendered as HTML (Mermaid's `htmlLabels`, on by
     default) so detail lines can use a different style than the main
@@ -250,7 +264,17 @@ class MermaidRenderer(Renderer):
             "  layout: elk",
             "  elk:",
             "    mergeEdges: true",
-            "    nodePlacementStrategy: NETWORK_SIMPLEX",
+            #: `modelOrder` + `forceNodeModelOrder` keep nodes within a layer in
+            #: the order we declare them (ascending by index, since
+            #: `graph.nodes` already comes pre-sorted that way) instead of
+            #: ELK's default crossing-minimization freely reordering them.
+            #: Also incidentally what gets the sidechain/monitor-feed "key"
+            #: edges routed via a node's north/south side rather than sharing
+            #: an east/west port with its main signal edges -- see the
+            #: "never share an attachment point" note on `MermaidRenderer`.
+            "    preset: modelOrder",
+            "    forceNodeModelOrder: true",
+            "    considerModelOrder: NODES_AND_EDGES",
             "---",
             "flowchart LR",
         ]
@@ -263,18 +287,18 @@ class MermaidRenderer(Renderer):
         for node in graph.nodes:
             nodes_by_kind.setdefault(node.kind, []).append(node)
 
+        #: Nodes are declared flat (not wrapped in a Mermaid `subgraph` per
+        #: rank group) -- ELK treats a `subgraph` as its own nested layout
+        #: problem, which was overriding `forceNodeModelOrder` and reordering
+        #: nodes within it regardless. `_RANK_GROUPS` still controls the
+        #: order nodes are *declared* in, which `forceNodeModelOrder` then
+        #: preserves in the actual layout.
         class_members: dict[str, list[str]] = {}
-        for rank_index, kinds in enumerate(_RANK_GROUPS):
-            rank_nodes = [n for kind in kinds for n in nodes_by_kind.get(kind, [])]
-            if not rank_nodes:
-                continue
-            lines.append(f"  subgraph rank{rank_index} [ ]")
-            lines.append("    direction LR")
-            for node in rank_nodes:
+        for kinds in _RANK_GROUPS:
+            for node in (n for kind in kinds for n in nodes_by_kind.get(kind, [])):
                 mid = _mermaid_id(node.id)
-                lines.append(f'    {mid}["{_node_html_label(node)}"]')
+                lines.append(f'  {mid}["{_node_html_label(node)}"]')
                 class_members.setdefault(node.kind, []).append(mid)
-            lines.append("  end")
 
         key_edge_indices: list[int] = []
         for edge_index, edge in enumerate(graph.edges):
