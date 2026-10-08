@@ -39,12 +39,34 @@ _KIND_LABELS = {"ch": "Ch", "aux": "Aux", "bus": "Bus", "main": "Main", "mtx": "
 #: `wing_diagram.render` is meant to produce.
 _KIND_ORDER = {"io_in": 0, "ch": 1, "aux": 1, "bus": 2, "main": 3, "mtx": 3, "io_out": 4}
 
+#: Sections that carry a Gate processing slot (`gate`/`gatesc`). Per
+#: `ai/dynamics-and-levels-plan.md` section 1.2, only Input Channels have a
+#: dedicated Gate -- every other strip type only has the Comp-family
+#: `dyn`/`dynsc` slot.
+_GATE_SECTIONS = ("ch",)
+
+#: Sections that carry the Comp-family dynamics slot (`dyn`/`dynsc`).
+_DYN_SECTIONS = ("ch", "aux", "bus", "main", "mtx")
+
+#: `gatesc.src`/`dynsc.src` prefix -> `NodeId` kind, for resolving a dynamics
+#: processor's key (sidechain) source to the node it's actually tapped from.
+#: `SELF` (no prefix) means no extra edge -- the processor keys off its own
+#: signal, which is already implicit. See `ai/dynamics-and-levels-plan.md`
+#: section 1.3: a channel's Gate/Comp can only key off *another channel*
+#: (`CH.n`); a bus/main/matrix's Comp can key off any bus/main/matrix/aux.
+_KEY_SOURCE_KINDS = {"CH": "ch", "BUS": "bus", "MAIN": "main", "MTX": "mtx", "AUX": "aux"}
+
 
 @dataclass(frozen=True)
 class Node:
     id: NodeId
     kind: str
     label: str
+    #: Extra descriptive lines shown under `label` (preamp gain, own trim,
+    #: active Gate/Comp badges) -- never affects node identity/equality
+    #: beyond what `label` already does; purely additive display detail.
+    #: See `ai/dynamics-and-levels-plan.md`.
+    detail: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,11 +109,13 @@ def build_routing_graph(snapshot: Snapshot, propmap: PropMap) -> RoutingGraph:
             conn = _active_conn(data)
             source_id = _resolve_source(conn) if conn is not None else None
             if source_id is not None:
-                add_edge(source_id, (section, index))
+                trim = ((data.get("in") or {}).get("set") or {}).get("trim")
+                meta = {"trim_db": trim} if trim else None
+                add_edge(source_id, (section, index), meta)
 
     for section in _SENDING_SECTIONS:
         for index, data in _section_items(ae, section):
-            _add_sends(data, (section, index), add_edge)
+            _add_sends(data, (section, index), propmap, add_edge)
 
     for out_grp, index, data in _io_out_entries(ae):
         resolved = _resolve_output_source(data)
@@ -99,6 +123,8 @@ def build_routing_graph(snapshot: Snapshot, propmap: PropMap) -> RoutingGraph:
             source_id, channel = resolved
             meta = {"channel": channel} if channel is not None else None
             add_edge(source_id, ("io_out", out_grp, index), meta)
+
+    _add_key_source_edges(ae, add_edge)
 
     nodes = [_make_node(node_id, ae, propmap) for node_id in touched]
     nodes.sort(key=lambda n: (_KIND_ORDER.get(n.kind, 99), n.id))
@@ -196,6 +222,7 @@ def _resolve_output_source(conn: dict[str, Any]) -> tuple[NodeId, str | None] | 
 def _add_sends(
     data: dict[str, Any],
     source_id: NodeId,
+    propmap: PropMap,
     add_edge: Callable[[NodeId, NodeId, dict[str, Any] | None], None],
 ) -> None:
     """Emit edges for every active `main.{1-4}` / `send.{1-16,MX1-8}` target.
@@ -208,14 +235,114 @@ def _add_sends(
     """
     for key, target in (data.get("main") or {}).items():
         if target.get("on"):
-            add_edge(source_id, ("main", int(key)), None)
+            add_edge(source_id, ("main", int(key)), _send_meta(data, source_id, target, propmap))
     for key, target in (data.get("send") or {}).items():
         if not target.get("on"):
             continue
+        meta = _send_meta(data, source_id, target, propmap)
         if key.startswith("MX"):
-            add_edge(source_id, ("mtx", int(key[2:])), None)
+            add_edge(source_id, ("mtx", int(key[2:])), meta)
         else:
-            add_edge(source_id, ("bus", int(key)), None)
+            add_edge(source_id, ("bus", int(key)), meta)
+
+
+def _send_meta(
+    source_data: dict[str, Any],
+    source_id: NodeId,
+    target: dict[str, Any],
+    propmap: PropMap,
+) -> dict[str, Any]:
+    """Build the `level_db`/`tap` meta for one active `main`/`send` edge.
+
+    See `ai/dynamics-and-levels-plan.md` section 1.4: `ch`/`aux` sends carry
+    a `mode` (`PRE` = the channel's own TAP point, `POST` = post-fader,
+    `GRP` = "GROUP" -- no independent level, same signal as the post-fader
+    main/group output). Every other send shape (`main.{1-4}` on any
+    section, and `bus`/`main`/`mtx`'s own `send.*`) has no `mode`, just a
+    `pre` boolean against a *fixed* tap position (see `_FIXED_TAP_LABEL`/
+    `_channel_tap_label`).
+    """
+    mode = target.get("mode")
+    if mode == "GRP":
+        return {"tap": "GROUP"}
+
+    meta: dict[str, Any] = {}
+    level_db = target.get("lvl")
+    if level_db is not None:
+        meta["level_db"] = level_db
+
+    if mode == "PRE":
+        meta["tap"] = _channel_tap_label(source_data, source_id, propmap)
+    elif mode == "POST":
+        meta["tap"] = "POST FADER"
+    elif target.get("pre"):
+        meta["tap"] = _FIXED_TAP_LABEL
+    else:
+        meta["tap"] = "POST FADER"
+    return meta
+
+
+#: The manual gives aux/bus/main/mtx a fixed, non-selectable tap point
+#: (e.g. "post insert point 1, pre-fader" for Bus/Main/Matrix) -- not worth
+#: resolving to that level of detail (see `ai/dynamics-and-levels-plan.md`
+#: section 1.4), just label it as the pre-fader tap it is.
+_FIXED_TAP_LABEL = "PRE FADER"
+
+
+def _channel_tap_label(source_data: dict[str, Any], source_id: NodeId, propmap: PropMap) -> str:
+    """Resolve a `ch`'s own configurable `ptap` point to a display label.
+
+    `aux` also sends in `PRE`/"TAP" mode, but (per the manual) its tap
+    point is fixed rather than user-selectable, so it has no `ptap` field
+    at all -- fall back to the same fixed label bus/main/mtx use.
+    """
+    if source_id[0] != "ch":
+        return _FIXED_TAP_LABEL
+    index = source_id[1]
+    label = propmap.resolve(f"ch/{index}/ptap", source_data.get("ptap"))
+    return f"TAP ({label})"
+
+
+def _add_key_source_edges(
+    ae: dict[str, Any],
+    add_edge: Callable[[NodeId, NodeId, dict[str, Any] | None], None],
+) -> None:
+    """Emit an edge for every active Gate/Comp whose key (sidechain) source
+    isn't `SELF` -- a real extra signal tap into that processor, not just a
+    cosmetic setting. See `ai/dynamics-and-levels-plan.md` section 1.3.
+
+    Only emitted when the processor itself is `on` (consistent with the
+    project's "active only" rule) -- a configured-but-disabled key source
+    on a disabled processor isn't a live signal path.
+    """
+    for section in _GATE_SECTIONS:
+        for index, data in _section_items(ae, section):
+            if not (data.get("gate") or {}).get("on"):
+                continue
+            key_source = _resolve_key_source((data.get("gatesc") or {}).get("src"))
+            if key_source is not None:
+                add_edge(key_source, (section, index), {"kind": "key", "proc": "GATE"})
+
+    for section in _DYN_SECTIONS:
+        for index, data in _section_items(ae, section):
+            if not (data.get("dyn") or {}).get("on"):
+                continue
+            key_source = _resolve_key_source((data.get("dynsc") or {}).get("src"))
+            if key_source is not None:
+                add_edge(key_source, (section, index), {"kind": "key", "proc": "COMP"})
+
+
+def _resolve_key_source(src: str | None) -> NodeId | None:
+    """Resolve a `gatesc.src`/`dynsc.src` value (e.g. `"CH.5"`, `"BUS.2"`)
+    to the `NodeId` it names, or `None` for `SELF`/unset (no extra edge --
+    the processor keys off its own signal, already implicit)."""
+    if not src or src == "SELF":
+        return None
+    prefix, _, number = src.partition(".")
+    kind = _KEY_SOURCE_KINDS.get(prefix)
+    if kind is None or not number.isdigit():
+        return None
+    return (kind, int(number))
 
 
 def _make_node(node_id: NodeId, ae: dict[str, Any], propmap: PropMap) -> Node:
@@ -224,22 +351,96 @@ def _make_node(node_id: NodeId, ae: dict[str, Any], propmap: PropMap) -> Node:
         _, grp, index = cast("tuple[str, str, int]", node_id)
         section = "in" if kind == "io_in" else "out"
         data = (((ae.get("io") or {}).get(section) or {}).get(grp) or {}).get(str(index)) or {}
-        label = data.get("name") or f"{_io_group_label(propmap, section, grp)} {index}"
-        return Node(id=node_id, kind=kind, label=label)
+        hw_label = f"{_io_group_label(propmap, section, grp)} {index}"
+        own_name = data.get("name")
+        label = own_name or hw_label
+        detail = ((hw_label,) if kind == "io_in" and own_name else ()) + (
+            _preamp_gain_detail(data) if kind == "io_in" else ()
+        )
+        return Node(id=node_id, kind=kind, label=label, detail=detail)
 
     _, index = cast("tuple[str, int]", node_id)
     data = (ae.get(kind) or {}).get(str(index)) or {}
+    detail = _own_trim_detail(kind, data) + _dynamics_detail(kind, index, data, propmap)
     own_name = data.get("name")
     if own_name:
-        return Node(id=node_id, kind=kind, label=own_name)
+        return Node(id=node_id, kind=kind, label=own_name, detail=detail)
 
     if kind in _SINGLE_SOURCE_SECTIONS:
         conn = _active_conn(data)
         source_id = _resolve_source(conn) if conn is not None else None
         if source_id is not None:
-            return Node(id=node_id, kind=kind, label=_make_node(source_id, ae, propmap).label)
+            fallback_label = _make_node(source_id, ae, propmap).label
+            return Node(id=node_id, kind=kind, label=fallback_label, detail=detail)
 
-    return Node(id=node_id, kind=kind, label=f"{_KIND_LABELS[kind]} {index}")
+    return Node(id=node_id, kind=kind, label=f"{_KIND_LABELS[kind]} {index}", detail=detail)
+
+
+def _preamp_gain_detail(io_in_data: dict[str, Any]) -> tuple[str, ...]:
+    """`io/in/<grp>/<n>/g` -- the physical input's analog preamp gain. Only
+    `io_in` has this (no analog stage on an output jack); it's a property
+    of the Source, not of whichever channel currently consumes it, so it's
+    shown on the `io_in` node rather than on the edge into a channel (c.f.
+    `trim_db`, which *is* per-channel and lives on that edge instead). See
+    `ai/dynamics-and-levels-plan.md` section 1.1/2."""
+    gain = io_in_data.get("g")
+    if gain is None:
+        return ()
+    return (f"preamp {gain:+.1f} dB",)
+
+
+def _own_trim_detail(kind: str, data: dict[str, Any]) -> tuple[str, ...]:
+    """`<section>/<n>/in/set/trim` -- digital trim on the element's own
+    strip. `ch`/`aux` already show this on their inbound source edge (see
+    `build_routing_graph`'s `_SINGLE_SOURCE_SECTIONS` loop); `bus`/`main`/
+    `mtx` have no single inbound edge to attach it to (their content is an
+    implicit sum of sends -- see `ai/schema-notes.md`), so it's shown as
+    node detail instead. Omitted at the default (0 dB) to avoid cluttering
+    every untouched strip -- see `ai/dynamics-and-levels-plan.md`."""
+    if kind in _SINGLE_SOURCE_SECTIONS:
+        return ()
+    trim = ((data.get("in") or {}).get("set") or {}).get("trim")
+    if not trim:
+        return ()
+    return (f"trim {trim:+.1f} dB",)
+
+
+def _dynamics_detail(
+    kind: str, index: int, data: dict[str, Any], propmap: PropMap
+) -> tuple[str, ...]:
+    """Badge lines for this node's active Gate/Comp, if any (only `on`
+    processors are shown, per the project's "active only" rule). Dynamics
+    models have mostly-disjoint parameter sets (see `ai/schema-notes.md`
+    "Model-dependent sub-blocks"), so this reads defensively and shows only
+    whichever of model/threshold/gain are actually present rather than
+    assuming a fixed shape. See `ai/dynamics-and-levels-plan.md`
+    section 1.2."""
+    lines: list[str] = []
+    if kind in _GATE_SECTIONS:
+        gate = data.get("gate") or {}
+        if gate.get("on"):
+            lines.append(_dynamics_badge("GATE", kind, index, "gate", gate, propmap))
+    if kind in _DYN_SECTIONS:
+        dyn = data.get("dyn") or {}
+        if dyn.get("on"):
+            lines.append(_dynamics_badge("COMP", kind, index, "dyn", dyn, propmap))
+    return tuple(lines)
+
+
+def _dynamics_badge(
+    prefix: str, kind: str, index: int, block_key: str, block: dict[str, Any], propmap: PropMap
+) -> str:
+    parts = [prefix]
+    model_raw = block.get("mdl")
+    if model_raw:
+        parts.append(str(propmap.resolve(f"{kind}/{index}/{block_key}/mdl", model_raw)))
+    thr = block.get("thr")
+    if thr is not None:
+        parts.append(f"thr {thr:+.0f} dB")
+    gain = block.get("gain")
+    if gain:
+        parts.append(f"gain {gain:+.0f} dB")
+    return " · ".join(parts)
 
 
 def _io_group_label(propmap: PropMap, section: str, grp: str) -> str:

@@ -63,9 +63,14 @@ def test_build_routing_graph_against_real_sample() -> None:
     assert nodes_by_id[("io_in", "LCL", 1)].label == "Wren"
     assert nodes_by_id[("ch", 1)].label == "Wren"
     assert Edge(("io_in", "LCL", 1), ("ch", 1)) in graph.edges
-    assert Edge(("ch", 1), ("main", 1)) in graph.edges
-    assert Edge(("ch", 1), ("main", 2)) in graph.edges
-    assert Edge(("ch", 1), ("bus", 1)) in graph.edges
+
+    # ch 1's main/bus sends: `main.{1,2}` and `send.1` all carry `lvl`/
+    # `pre`/`mode` in the real sample file, so every active send/main edge
+    # now carries a resolved `level_db`/`tap` -- see
+    # `ai/dynamics-and-levels-plan.md` section 1.4/2.
+    assert Edge(("ch", 1), ("main", 1), {"level_db": 0, "tap": "POST FADER"}) in graph.edges
+    assert Edge(("ch", 1), ("main", 2), {"level_db": 0, "tap": "POST FADER"}) in graph.edges
+    assert Edge(("ch", 1), ("bus", 1), {"level_db": -144, "tap": "POST FADER"}) in graph.edges
 
     # ch 13 is re-patched from bus 1 ("Speakers"), not a physical input, and
     # has a blank own name -- falls back to the bus's label.
@@ -100,6 +105,24 @@ def test_build_routing_graph_against_real_sample() -> None:
     # are therefore not touched/included at all.
     assert ("io_out", "LCL", 1) not in nodes_by_id
     assert not any(e.dest == ("io_out", "LCL", 1) for e in graph.edges)
+
+    # A named physical input also shows its hardware designation (the
+    # label an unnamed jack would fall back to) alongside its preamp gain
+    # (on the physical input, not the channel; at unity here).
+    assert nodes_by_id[("io_in", "LCL", 1)].detail == ("LOCAL IN 1", "preamp +0.0 dB")
+
+    # ch 1 has an active Comp (no Gate); the badge resolves `mdl`'s enum
+    # value through the propmap and includes threshold/make-up gain.
+    assert nodes_by_id[("ch", 1)].detail == ("COMP · WING COMPRESSOR · thr -20 dB · gain +6 dB",)
+
+    # ch 7 ("Ambient") has an active Gate-slot Ducker keyed off ch 13
+    # ("Speakers") -- the manual's own example of a key source ("KEY
+    # SOURCE: select another channel as the sidechain input" / the radio-
+    # host ducker example). This is a real extra signal tap, rendered as
+    # its own dashed "key" edge -- see `ai/dynamics-and-levels-plan.md`
+    # section 1.3.
+    assert nodes_by_id[("ch", 7)].detail == ("GATE · DUCKER · thr -20 dB",)
+    assert Edge(("ch", 13), ("ch", 7), {"kind": "key", "proc": "GATE"}) in graph.edges
 
 
 def test_disconnected_physical_inputs_are_not_included() -> None:
@@ -191,7 +214,10 @@ def test_send_to_matrix_via_mx_key(tmp_path: Path) -> None:
 
     graph = build_routing_graph(_snapshot(ae_data), propmap)
 
-    assert Edge(("bus", 1), ("mtx", 2)) in graph.edges
+    # No `lvl`/`pre` in this minimal fixture -- `level_db` is omitted, and
+    # `tap` falls back to "POST FADER" (a falsy/missing `pre` reads the
+    # same as `pre: false`).
+    assert Edge(("bus", 1), ("mtx", 2), {"tap": "POST FADER"}) in graph.edges
 
 
 def test_fx_send_and_monitor_sources_are_skipped(tmp_path: Path) -> None:
@@ -314,3 +340,257 @@ def test_node_and_edge_ordering_is_deterministic(tmp_path: Path) -> None:
         ("ch", 2),
         ("main", 1),
     ]
+
+
+# --- Gain, dynamics, key-source, and tap-point detail -----------------------
+# See `ai/dynamics-and-levels-plan.md`.
+
+
+def _propmap(tmp_path: Path, entries: list[dict]) -> PropMap:
+    propmap_path = tmp_path / "propmap.jsonl"
+    propmap_path.write_text("\n".join(json.dumps(entry) for entry in entries) + "\n")
+    return PropMap.load(propmap_path)
+
+
+def test_preamp_gain_shown_on_io_in_node(tmp_path: Path) -> None:
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "io": {"in": {"LCL": {"1": {"name": "Kick", "g": 32.5}}}},
+        "ch": {"1": {"name": "", "in": {"conn": {"grp": "LCL", "in": 1}}}},
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    nodes_by_id = {node.id: node for node in graph.nodes}
+    assert nodes_by_id[("io_in", "LCL", 1)].detail == ("LOCAL IN 1", "preamp +32.5 dB")
+
+
+def test_unnamed_io_in_does_not_duplicate_hardware_label(tmp_path: Path) -> None:
+    """An unnamed physical input's `label` already *is* the hardware
+    designation (e.g. "LOCAL IN 2") -- it shouldn't also repeat as a
+    detail line."""
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "io": {"in": {"LCL": {"2": {"g": 10}}}},
+        "ch": {"1": {"name": "", "in": {"conn": {"grp": "LCL", "in": 2}}}},
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    nodes_by_id = {node.id: node for node in graph.nodes}
+    node = nodes_by_id[("io_in", "LCL", 2)]
+    assert node.label == "LOCAL IN 2"
+    assert node.detail == ("preamp +10.0 dB",)
+
+
+def test_input_trim_shown_on_edge_when_nonzero(tmp_path: Path) -> None:
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "ch": {
+            "1": {
+                "name": "Lead",
+                "in": {"set": {"trim": 3.5}, "conn": {"grp": "LCL", "in": 1}},
+            }
+        }
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    assert Edge(("io_in", "LCL", 1), ("ch", 1), {"trim_db": 3.5}) in graph.edges
+
+
+def test_input_trim_omitted_when_zero(tmp_path: Path) -> None:
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "ch": {
+            "1": {
+                "name": "Lead",
+                "in": {"set": {"trim": 0}, "conn": {"grp": "LCL", "in": 1}},
+            }
+        }
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    assert Edge(("io_in", "LCL", 1), ("ch", 1)) in graph.edges
+
+
+def test_bus_own_trim_shown_as_node_detail(tmp_path: Path) -> None:
+    """`bus`/`main`/`mtx` have no single inbound edge to hang their own
+    trim on (their content is an implicit sum of sends), so it's surfaced
+    as node detail instead -- unlike `ch`/`aux`, which show it on their
+    inbound source edge (see the trim tests above)."""
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "bus": {"1": {"name": "Sub", "in": {"set": {"trim": -2}}, "main": {"1": {"on": True}}}}
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    nodes_by_id = {node.id: node for node in graph.nodes}
+    assert nodes_by_id[("bus", 1)].detail == ("trim -2.0 dB",)
+
+
+def test_send_group_mode_has_no_independent_level(tmp_path: Path) -> None:
+    """`GRP` ("GROUP") send mode is literally the channel's post-fader
+    group output -- there's no independent level control, so `level_db`
+    is omitted even though the fixture still carries a (meaningless) `lvl`
+    value, same as the real console would."""
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "ch": {"1": {"name": "Lead", "send": {"1": {"on": True, "lvl": -6, "mode": "GRP"}}}}
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    assert Edge(("ch", 1), ("bus", 1), {"tap": "GROUP"}) in graph.edges
+
+
+def test_send_pre_mode_uses_channel_tap_point(tmp_path: Path) -> None:
+    propmap = _propmap(
+        tmp_path,
+        [
+            {
+                "id": 1,
+                "name": "ptap",
+                "longname": "TAP POINT",
+                "type": "string enum",
+                "items": [{"item": "FILT", "longitem": "FILTER"}],
+                "fullname": "/ch/1/ptap",
+            }
+        ],
+    )
+    ae_data = {
+        "ch": {
+            "1": {
+                "name": "Lead",
+                "ptap": "FILT",
+                "send": {"1": {"on": True, "lvl": -3, "mode": "PRE"}},
+            }
+        }
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    assert Edge(("ch", 1), ("bus", 1), {"level_db": -3, "tap": "TAP (FILTER)"}) in graph.edges
+
+
+def test_send_post_mode_label(tmp_path: Path) -> None:
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "ch": {"1": {"name": "Lead", "send": {"1": {"on": True, "lvl": -3, "mode": "POST"}}}}
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    assert Edge(("ch", 1), ("bus", 1), {"level_db": -3, "tap": "POST FADER"}) in graph.edges
+
+
+def test_bus_send_fixed_pre_fader_tap(tmp_path: Path) -> None:
+    """`bus`/`main`/`mtx` sends have no `mode` at all -- just a `pre`
+    boolean against a fixed (non-selectable) tap position."""
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {"bus": {"1": {"name": "Sub", "send": {"MX1": {"on": True, "lvl": 0, "pre": True}}}}}
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    assert Edge(("bus", 1), ("mtx", 1), {"level_db": 0, "tap": "PRE FADER"}) in graph.edges
+
+
+def test_inactive_dynamics_are_not_shown(tmp_path: Path) -> None:
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "ch": {
+            "1": {
+                "name": "Lead",
+                "gate": {"on": False, "mdl": "GATE", "thr": -40},
+                "dyn": {"on": False, "mdl": "COMP", "thr": -20},
+                "main": {"1": {"on": True}},
+            }
+        }
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    nodes_by_id = {node.id: node for node in graph.nodes}
+    assert nodes_by_id[("ch", 1)].detail == ()
+
+
+def test_dynamics_badge_falls_back_to_raw_model_without_propmap_entry(tmp_path: Path) -> None:
+    """A dynamics model's `mdl` enum is resolved via the propmap when
+    available (see the real-sample test), but defensively falls back to
+    the raw value when it isn't -- the badge should never blow up just
+    because one model's propmap entry wasn't loaded."""
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "bus": {
+            "1": {
+                "name": "Sub",
+                "dyn": {"on": True, "mdl": "SBUS", "thr": -10},
+                "main": {"1": {"on": True}},
+            }
+        }
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    nodes_by_id = {node.id: node for node in graph.nodes}
+    assert nodes_by_id[("bus", 1)].detail == ("COMP · SBUS · thr -10 dB",)
+
+
+def test_key_source_edge_for_comp_sidechain(tmp_path: Path) -> None:
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "bus": {
+            "1": {
+                "name": "Sub",
+                "dyn": {"on": True, "mdl": "COMP", "thr": -10},
+                "dynsc": {"src": "BUS.2"},
+                "main": {"1": {"on": True}},
+            },
+            "2": {"name": "Drums", "main": {"1": {"on": True}}},
+        }
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    assert Edge(("bus", 2), ("bus", 1), {"kind": "key", "proc": "COMP"}) in graph.edges
+
+
+def test_self_key_source_produces_no_key_edge(tmp_path: Path) -> None:
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "ch": {
+            "1": {
+                "name": "Lead",
+                "dyn": {"on": True, "mdl": "COMP", "thr": -10},
+                "dynsc": {"src": "SELF"},
+                "main": {"1": {"on": True}},
+            }
+        }
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    assert not any(e.meta.get("kind") == "key" for e in graph.edges)
+
+
+def test_disabled_dynamics_produces_no_key_edge(tmp_path: Path) -> None:
+    """A configured key source on a disabled processor isn't a live signal
+    path -- consistent with the project's "active only" rule."""
+    propmap = _minimal_propmap(tmp_path)
+    ae_data = {
+        "ch": {
+            "1": {
+                "name": "Lead",
+                "dyn": {"on": False, "mdl": "COMP", "thr": -10},
+                "dynsc": {"src": "CH.2"},
+                "main": {"1": {"on": True}},
+            },
+            "2": {"name": "Other", "main": {"1": {"on": True}}},
+        }
+    }
+
+    graph = build_routing_graph(_snapshot(ae_data), propmap)
+
+    assert not any(e.meta.get("kind") == "key" for e in graph.edges)
