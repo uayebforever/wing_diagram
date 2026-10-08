@@ -138,34 +138,38 @@ reworking the data model:
   off a downstream bus would otherwise introduce a back-edge into the rank
   ordering). This directly answers "shown with a different line type."
 
-## 3. Main open question: how much of this is always-on?
+## 3. Decision: always-on, no CLI flags
 
-The current diagram is deliberately minimal (plain boxes, blank edges) so it
-stays legible across a real console's worth of channels. Adding level
-labels, tap-point text, dynamics badges, and key-source edges to *every*
-node/edge at once risks making a 40-channel diagram unreadable. I'd suggest
-making this additive detail **opt-in via CLI flags** on the existing
-`routing` command (e.g. `--show-levels`, `--show-dynamics`, `--show-keys`),
-independently togglable, rather than baking all of it into the one diagram
-unconditionally — the routing-only diagram stays the default/clean view,
-and detail layers stack on top for whoever wants to audit gain staging or
-dynamics setup specifically. Happy to default some subset on if you'd rather
-not have flags at all; flagging this because it changes the CLI surface and
-seemed worth agreeing on before building it.
+Resolved: the diagram can be made as large as needed (poster-sized if
+necessary), so all of this detail is **always on** rather than gated behind
+CLI flags — the existing "don't show unconfigured channels/pathways"
+convention is kept as the only filter. A more capable diagramming library
+may be worth exploring later if Graphviz's layout stops scaling, but that's
+a separate decision once the current approach is seen working.
 
-## 4. Suggested build order
+## 4. Status: implemented
 
-1. Extend `routing.py`: carry `lvl`/`mode`/`pre` into `Edge.meta` for
-   existing send/main edges (no new nodes yet) — smallest change, immediately
-   useful, no rendering changes required beyond reading the new meta keys.
-2. Add preamp-gain/trim labelling on `io_in` nodes and input edges.
-3. Add `Node.dynamics` population from `gate`/`dyn` blocks + badge rendering.
-4. Add key-source edges (`gatesc.src`/`dynsc.src` resolution, new edge kind,
-   dashed/non-constraining rendering) — do this last since it's the one
-   piece touching graph layout (rank/constraint behavior), and benefits most
-   from the rest of the label vocabulary already existing to borrow from.
-5. Wire the above behind CLI flags per §3, defaulting to the current
-   routing-only behaviour.
+Built in the order below, each step verified against
+`wing_snaps/Announcements.snap` (including the real "Ambient" channel's
+Gate-slot Ducker keyed off "Speakers" — the manual's own example scenario,
+found in the sample file rather than needing to be constructed):
 
-Each step is independently testable against `wing_snaps/Announcements.snap`,
-same pattern as the existing `test_routing.py`/`test_render.py` suites.
+1. `routing.py`: `_send_meta`/`_channel_tap_label` resolve `lvl`/`mode`/
+   `pre` into `Edge.meta["level_db"]`/`["tap"]` for every `main`/`send`
+   edge, and `ptap` into a human label for `PRE`/"TAP" mode sends.
+2. `_preamp_gain_detail`/`_own_trim_detail` add preamp gain (`io_in` node)
+   and trim (input edge for `ch`/`aux`; node detail for `bus`/`main`/`mtx`,
+   which have no inbound edge to hang it on).
+3. `_dynamics_detail`/`_dynamics_badge` add `Node.detail` lines for active
+   (`on: true`) Gate/Comp slots — model (resolved via propmap, falling
+   back to the raw value defensively since dynamics models have mostly
+   disjoint parameter sets), threshold, make-up gain.
+4. `_add_key_source_edges`/`_resolve_key_source` add a dashed, non-rank-
+   constraining `"kind": "key"` edge from a key source to the node hosting
+   the Gate/Comp that keys off it, labelled `KEY (GATE)`/`KEY (COMP)`.
+
+`render.py`'s `GraphvizRenderer` renders `Node.detail` as extra lines under
+the label and builds each edge's label from whichever `meta` keys apply;
+key edges get their own dashed/colored/`constraint=false` treatment. See
+`routing.py`/`render.py` and `tests/wing_diagram/test_routing.py`/
+`test_render.py` for the actual implementation and coverage.

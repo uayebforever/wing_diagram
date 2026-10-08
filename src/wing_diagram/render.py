@@ -5,7 +5,7 @@ from pathlib import Path
 
 import graphviz
 
-from .routing import Node, NodeId, RoutingGraph
+from .routing import Edge, Node, NodeId, RoutingGraph
 
 #: Left-to-right rank groups: nodes in the same group get `rank=same`, and
 #: groups are declared in this order so Graphviz lays the diagram out as a
@@ -28,6 +28,13 @@ _NODE_COLORS = {
     "mtx": "#ffd9d9",
 }
 
+#: Key (sidechain) edges are a control tap into a Gate/Comp, not an audio
+#: signal path -- rendered dashed, in a distinct color, and non-rank-
+#: `constraint`-ing so a bus/main/matrix keying off a later-ranked element
+#: doesn't warp the left-to-right signal-flow layout. See
+#: `ai/dynamics-and-levels-plan.md` section 2.
+_KEY_EDGE_COLOR = "#b35900"
+
 
 class Renderer(ABC):
     """Renders a `RoutingGraph` to a file. Implementation-agnostic boundary."""
@@ -41,16 +48,15 @@ class Renderer(ABC):
 class GraphvizRenderer(Renderer):
     """Renders a `RoutingGraph` as a left-to-right Graphviz diagram.
 
-    Basic v1 implementation: one box per node, colored by kind, laid out
-    left-to-right by rank group (see `_RANK_GROUPS`). Edges carry a label
-    only when `Edge.meta["channel"]` is set -- currently just the L/R tap
-    an `io.out` edge was patched from when its source is a stereo
-    bus/main/mtx (see `wing_diagram.routing._resolve_output_source`);
-    every other edge (channel/aux/bus sends, physical passthrough) is a
-    full stereo-to-stereo or mono-to-mono connection with nothing to
-    disambiguate, so it's left unlabeled. This exists mainly to let the
-    routing graph be eyeballed against the real console; refine the
-    visuals separately once the routing side is validated.
+    One box per node, colored by kind, laid out left-to-right by rank
+    group (see `_RANK_GROUPS`). A node's box also shows any `detail` lines
+    (preamp gain, own trim, active Gate/Comp badges) under its label, and
+    an edge's label shows whichever of its `meta` applies -- L/R tap,
+    send/main level + tap point, or input trim (see `_node_label`/
+    `_edge_label`, and `ai/dynamics-and-levels-plan.md` section 2). Key
+    (sidechain) edges are drawn separately: dashed, a distinct color, and
+    non-rank-constraining, since they're a control tap rather than an
+    audio path.
     """
 
     def __init__(self, format: str | None = None) -> None:
@@ -89,20 +95,68 @@ class GraphvizRenderer(Renderer):
                 for node in rank_nodes:
                     sub.node(
                         _dot_id(node),
-                        label=node.label,
+                        label=_node_label(node),
                         fillcolor=_NODE_COLORS.get(node.kind, "#ffffff"),
                     )
 
         for edge in graph.edges:
-            channel = edge.meta.get("channel")
+            if edge.meta.get("kind") == "key":
+                dot.edge(
+                    _dot_node_id(edge.source),
+                    _dot_node_id(edge.dest),
+                    label=f"KEY ({edge.meta['proc']})" if edge.meta.get("proc") else "KEY",
+                    fontsize="10",
+                    style="dashed",
+                    color=_KEY_EDGE_COLOR,
+                    fontcolor=_KEY_EDGE_COLOR,
+                    constraint="false",
+                )
+                continue
             dot.edge(
                 _dot_node_id(edge.source),
                 _dot_node_id(edge.dest),
-                label=channel if channel else "",
+                label=_edge_label(edge),
                 fontsize="10",
             )
 
         return dot
+
+
+def _node_label(node: Node) -> str:
+    """`node.label` plus any `detail` lines (preamp gain, own trim, active
+    Gate/Comp badges), each on its own line. `\\n` is Graphviz's line-break
+    escape inside a plain (non-HTML) label -- see `ai/dynamics-and-levels-
+    plan.md` section 2."""
+    return "\\n".join((node.label, *node.detail))
+
+
+def _edge_label(edge: Edge) -> str:
+    """Builds an edge's label from whichever of `channel` (an `io_out`
+    edge's L/R tap), `level_db`/`tap` (a send/main edge's level and where
+    it's tapped from), or `trim_db` (an input edge's channel trim) is
+    present in `edge.meta` -- these are mutually exclusive by edge kind
+    (see `ai/dynamics-and-levels-plan.md` section 2), so simply collecting
+    whichever apply is safe."""
+    parts: list[str] = []
+    channel = edge.meta.get("channel")
+    if channel:
+        parts.append(channel)
+    level_db = edge.meta.get("level_db")
+    if level_db is not None:
+        parts.append(_format_level(level_db))
+    tap = edge.meta.get("tap")
+    if tap:
+        parts.append(tap)
+    trim_db = edge.meta.get("trim_db")
+    if trim_db is not None:
+        parts.append(f"trim {trim_db:+.1f} dB")
+    return "\\n".join(parts)
+
+
+def _format_level(level_db: float) -> str:
+    if level_db <= -144:
+        return "-∞ dB"
+    return f"{level_db:+.1f} dB"
 
 
 def _dot_id(node: Node) -> str:
