@@ -100,3 +100,152 @@ hardcoding per-section counts anywhere.
 - Whether `dir.in`'s small enum is truly fixed, or whether its `items` list
   in `propmap.jsonl` varies by model/firmware (we've only inspected one
   snapshot/propmap pairing so far).
+
+## `bus`/`main`/`mtx` do have an `in` key -- it's just not a source
+
+Confirmed directly (schema-notes previously only said bus has "no
+`in.conn`", which could be read as "no `in` key at all"): `bus.<n>.in`,
+`main.<n>.in`, and `mtx.<n>.in` are all present, but each is just
+`{"set": {"inv", "trim", "bal"}}` -- phase/trim/balance controls on the
+element's own fader strip, no `conn` sub-key, nothing resembling a source.
+Don't let the presence of `in` fool you into thinking these have a single
+upstream source after all.
+
+## `in.conn`'s alt-source pair (`altgrp`/`altin`) can be the *active* one
+
+`ch`/`aux`'s `in.set` has `altsrc` (bool-as-int, "ALT INPUT") alongside
+`srcauto` ("ALT AUTOSW"). `altsrc` is what actually selects, for a given
+snapshot, whether the strip's live source is `conn.{grp,in}` (false) or
+`conn.{altgrp,altin}` (true) -- `routing.py` reads this flag and picks the
+active pair accordingly. `srcauto` governs *automatic* failover to the alt
+source on signal loss, which isn't a property a static snapshot can
+represent either way, so `wing_diagram.routing` ignores it entirely. Not
+exercised by the sample file (`Announcements.snap` has `altsrc: false`
+throughout), so this path is only unit-tested, not validated against real
+console data yet -- worth re-checking against a snapshot that actually uses
+alt sourcing if one turns up.
+
+## `io.out`'s `grp`/`in` is a full patch matrix, not just "carries a main"
+
+Confirmed by both the sample file and `propmap.jsonl`'s enum for e.g.
+`/io/out/LCL/1/grp`: a physical output's source `grp` can be *any* of the
+physical input groups (`LCL`, `AUX`, `A`, `B`, `C`, `SC`, `USB`, `CRD`,
+`MOD`, `PLAY`, `AES`, `USR`, `OSC` -- the exact same vocabulary as
+`io.in`'s own group keys, and as `in.conn.grp`'s physical options) *in
+addition to* `BUS`/`MAIN`/`MTX`/`SEND`/`MON`/`OFF`. So a physical output
+jack can be patched straight from another physical input (hardware
+passthrough, bypassing the mix engine entirely), not only from an internal
+bus/main/matrix. `wing_diagram.routing._resolve_output_source` shares the
+physical-group half of this resolution with `in.conn`'s
+`_resolve_source`, but **not** the internal-re-patch half -- see the next
+note, which corrects an earlier (wrong) version of this note that assumed
+they were identical.
+
+## `io.out`'s internal-source `in` is a flattened L/R tap index, not the element's own index
+
+This one actually produced a wrong diagram in an earlier pass, caught by
+eyeballing the rendered output against the real console: every mixer
+element with a stereo signal path (`ch`, `aux`, `bus`, `main`, `mtx` --
+all of them, confirmed via each section's own `busmono` field, which lets
+*any* of them be downmixed to mono without changing this) occupies
+exactly **2** taps in `io.out`'s source numbering for `BUS`/`MAIN`/`MTX`,
+always, regardless of that element's own `busmono` setting: tap `1` is
+element 1's L, tap `2` is element 1's R, tap `3` is element 2's L, and so
+on -- `element = (tap - 1) // 2 + 1`, `channel = "L" if (tap - 1) % 2 ==
+0 else "R"`. A mono-downmixed element still reserves both taps (just with
+the same signal duplicated onto each), so even its "R" tap is a valid,
+meaningful patch target.
+
+Confirmed against `Announcements.snap`: `main.1` ("Sanctuary Mix") has
+`busmono: true`; `main.2` ("Stream Mix") has `busmono: false`. The active
+`io.out` entries are `io.out.LCL.5 == {"grp": "MAIN", "in": 3}`,
+`io.out.LCL.6 == {"grp": "MAIN", "in": 4}`, `io.out.LCL.8 == {"grp":
+"MAIN", "in": 2}`. Naively treating `in` as the main's own index (1-4)
+would read this as "main 2 → LCL 5, main 3 → LCL 6, main 4 → LCL 8" --
+wrong, and an earlier version of `wing_diagram.routing` did exactly that.
+Under the tap formula it's "main 1 R → LCL 8, main 2 L → LCL 5, main 2 R →
+LCL 6" -- i.e. Sanctuary Mix (mono) on LCL 8, Stream Mix (stereo) split
+across LCL 5 (L) / LCL 6 (R). That's what the console is actually
+configured to do.
+
+By contrast, `in.conn` (`ch`/`aux` re-patching from `BUS`/`MAIN`/`MTX`)
+and `cfg.mon.<n>.src` (whose enum lists exactly 16 `BUS.<n>`/4
+`MAIN.<n>`/8 `MTX.<n>` items, not 32/8/16) both address the element
+directly by its own 1-based index, picking up the whole stereo element
+rather than a single mono tap -- that makes sense, since both of those
+targets are themselves stereo-capable (another channel strip; a stereo
+headphone/monitor output), unlike a physical output jack which is mono
+and must pick a side. So `wing_diagram.routing` has two separate
+resolvers: `_resolve_source` (direct index, for `in.conn`) and
+`_resolve_output_source` (flattened tap, for `io.out`) -- don't
+accidentally reunify them.
+
+`Edge.meta["channel"]` (`"L"`/`"R"`) now carries this for `io.out` edges
+sourced from an internal element, and `GraphvizRenderer` draws it as an
+edge label, so the rendered diagram shows which side of a stereo
+bus/main/mtx actually reached a given physical output.
+
+## `cfg.mon.*` (monitor/PFL buses) are a real routing destination, deliberately out of scope
+
+`io.out.<grp>.<n>.grp` can be `"MON"`, meaning that physical output jack
+carries a monitor/PFL bus (`cfg.mon.<n>`, aka "PHONES" in the sample file)
+rather than a main/bus/matrix. `cfg.mon.<n>` has its own `src` field (a
+dotted-string enum like `"MAIN.2"`, `"BUS.5"`, `"MTX.3"`, `"AUX.1"` --
+notably a *different* shape from the `{"grp", "in"}` dict used everywhere
+else) selecting what feeds that monitor bus, plus `srcmix`/`dirin` for
+further monitor-specific mixing. The initial plan's description of `cfg`
+("monitor, solo, talkback, etc. -- not routing") already puts this out of
+scope, and `wing_diagram.routing` follows that: `io.out` entries with
+`grp == "MON"` are skipped (no edge emitted, same treatment as `SEND`/FX),
+and `cfg.mon` itself is never visited. This does mean a small number of
+real `io.out` entries (2 of 7 active ones in the sample file) don't appear
+in the diagram at all -- that's intentional, not a bug, but worth knowing
+if the rendered graph looks like it's missing an output you expected to
+see.
+
+## Node/edge inclusion rule actually used by `wing_diagram.routing`
+
+The initial plan said "active routes only" about *edges*; `build_routing_graph`
+extends the same idea to *nodes*: a node (physical I/O, channel, bus, main,
+or matrix) is only included in the `RoutingGraph` if it's an endpoint of at
+least one active edge. A physical input that's never patched anywhere, or a
+channel that's fully off (`in.conn.grp == "OFF"` and no active
+`main`/`send`), is omitted entirely rather than shown as a disconnected
+box -- this keeps the diagram legible given how many physical I/O
+instances a real console has (e.g. 48 AES50-A inputs, most unused in any
+given snapshot). If a future pass wants an "show everything" mode, this is
+the rule to make configurable.
+
+## Two different, easily-confused meanings of a group code's "label"
+
+There are two unrelated propmap lookups that both turn a group code like
+`"LCL"` into a human label, and conflating them is a bug that actually
+shipped once (physical output jacks rendered as "LOCAL IN 8" instead of
+"LOCAL OUT 8"):
+
+1. **What a `grp` *value* means, when selecting a source.** This is the
+   shared enum on fields like `in.conn.grp` or `io.out.<grp>.<n>.grp`
+   (e.g. `/io/out/LCL/1/grp`'s `items` list). It's **direction-agnostic**:
+   `"LCL"` is always `"LOCAL IN"` here, *even when it's naming the source
+   patched into a physical output* -- because what's being named is the
+   source location, and the Local bank's inputs are what you'd be
+   tapping. `PropMap.resolve("io/out/LCL/1/grp", "LCL")` (or any
+   equivalent path -- the enum is identical everywhere this field
+   appears) gives this.
+2. **What the `io.<section>.<grp>` bank is itself called**, as a
+   container -- e.g. `/io/in/LCL` has `longname: "LOCAL IN"` but
+   `/io/out/LCL` has `longname: "LOCAL OUT"`. This **is**
+   direction-specific (so is `/io/in/AUX` "AUX IN" vs `/io/out/AUX` "AUX
+   OUT"; a few groups coincidentally share a label either way, e.g. `A`
+   "AES50 A"). `PropMap.describe(f"io/{section}/{grp}").display_name`
+   gives this.
+
+`wing_diagram.routing._io_group_label` uses (2), via `PropMap.describe`,
+specifically to label an *unnamed physical jack's own node* (e.g.
+fallback label `"LOCAL OUT 8"` for an `io.out.LCL.8` entry with no
+`name`). An earlier version used (1) for this by mistake (reusing the
+`grp`-*value* enum to describe the jack bank itself), which is how every
+unnamed output ended up labelled "LOCAL IN n" regardless of whether it
+was actually an input or output. `_resolve_source`/`_resolve_output_source`
+correctly use (1) -- they're actually interpreting a `grp` *value* naming
+a source, not labelling a bank.

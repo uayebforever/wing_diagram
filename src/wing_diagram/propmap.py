@@ -54,6 +54,11 @@ class PropMapEntry:
         return raw_value
 
 
+def default_propmap_path() -> Path:
+    """Path to the `propmap.jsonl` bundled alongside this package."""
+    return Path(__file__).resolve().parent / "propmap.jsonl"
+
+
 class PropMap:
     """Path -> metadata lookup for the Wing parameter space.
 
