@@ -103,6 +103,65 @@ def test_render_splits_config_detail_from_dynamics_detail(tmp_path: Path) -> Non
     assert "Ch 1: Wren" in content
 
 
+def test_render_omits_label_for_default_post_fader_send() -> None:
+    graph = RoutingGraph(
+        nodes=[
+            Node(id=("ch", 1), kind="ch", label="Ch 1"),
+            Node(id=("main", 1), kind="main", label="Sanctuary Mix"),
+        ],
+        edges=[Edge(("ch", 1), ("main", 1), {"level_db": 0.0, "tap": "POST FADER"})],
+    )
+
+    content = MermaidRenderer()._build_mermaid(graph)
+
+    assert "POST FADER" not in content
+    assert "n_ch_1 --> n_main_1" in content
+
+
+def test_render_shares_one_label_for_matching_non_default_sends() -> None:
+    graph = RoutingGraph(
+        nodes=[
+            Node(id=("ch", 1), kind="ch", label="Ch 1"),
+            Node(id=("bus", 1), kind="bus", label="Bus 1"),
+            Node(id=("bus", 2), kind="bus", label="Bus 2"),
+        ],
+        edges=[
+            Edge(("ch", 1), ("bus", 1), {"level_db": -20.0, "tap": "PRE FADER"}),
+            Edge(("ch", 1), ("bus", 2), {"level_db": -20.0, "tap": "PRE FADER"}),
+        ],
+    )
+
+    content = MermaidRenderer()._build_mermaid(graph)
+
+    # The matching label is shown exactly once, on a shared label node that
+    # the source fans out through to both destinations.
+    assert content.count("PRE FADER") == 1
+    assert "n_ch_1 --> n_label_n_ch_1_0" in content
+    assert "n_label_n_ch_1_0 --> n_bus_1" in content
+    assert "n_label_n_ch_1_0 --> n_bus_2" in content
+
+
+def test_render_keeps_separate_labels_for_differing_sends() -> None:
+    graph = RoutingGraph(
+        nodes=[
+            Node(id=("ch", 1), kind="ch", label="Ch 1"),
+            Node(id=("bus", 1), kind="bus", label="Bus 1"),
+            Node(id=("bus", 2), kind="bus", label="Bus 2"),
+        ],
+        edges=[
+            Edge(("ch", 1), ("bus", 1), {"level_db": -20.0, "tap": "PRE FADER"}),
+            Edge(("ch", 1), ("bus", 2), {"level_db": -6.0, "tap": "POST FADER"}),
+        ],
+    )
+
+    content = MermaidRenderer()._build_mermaid(graph)
+
+    assert "n_ch_1 -->|" in content
+    assert "n_label_" not in content
+    assert "PRE FADER" in content
+    assert "6.0 dB" in content
+
+
 def test_render_key_source_edge_is_dashed_and_colored(tmp_path: Path) -> None:
     graph = RoutingGraph(
         nodes=[
@@ -163,13 +222,16 @@ def test_render_declares_nodes_in_the_graphs_given_order() -> None:
     assert content.index("n_io_in_LCL_1[") < content.index("n_io_in_LCL_9[")
 
 
-def test_render_does_not_wrap_nodes_in_subgraphs() -> None:
+def test_render_does_not_wrap_flow_nodes_in_subgraphs() -> None:
     """A Mermaid `subgraph` is its own nested ELK layout problem and was
     observed to silently stop `forceNodeModelOrder` from applying to the
-    nodes inside it -- see `MermaidRenderer`'s docstring."""
+    nodes inside it -- see `MermaidRenderer`'s docstring. The legend is the
+    one deliberate exception, since it has no edges into the signal-flow
+    graph for `forceNodeModelOrder` to preserve order for."""
     content = MermaidRenderer()._build_mermaid(_sample_graph())
 
-    assert "subgraph" not in content
+    assert content.count("subgraph") == 1
+    assert "subgraph legend" in content
 
 
 def test_render_sets_elk_model_order_options() -> None:
@@ -177,3 +239,74 @@ def test_render_sets_elk_model_order_options() -> None:
 
     assert "forceNodeModelOrder: true" in content
     assert "preset: modelOrder" in content
+
+
+def test_render_includes_title_in_frontmatter_when_given() -> None:
+    content = MermaidRenderer()._build_mermaid(_sample_graph(), title="Announcements")
+
+    assert 'title: "Announcements"' in content
+
+
+def test_render_omits_title_when_not_given() -> None:
+    content = MermaidRenderer()._build_mermaid(_sample_graph())
+
+    assert "title:" not in content
+
+
+def test_render_escapes_quotes_in_title() -> None:
+    content = MermaidRenderer()._build_mermaid(_sample_graph(), title='Front "House" Mix')
+
+    assert 'title: "Front \\"House\\" Mix"' in content
+
+
+def test_render_includes_a_legend_with_kind_colors() -> None:
+    content = MermaidRenderer()._build_mermaid(_sample_graph())
+
+    assert "subgraph legend[Legend]" in content
+    assert 'legend_io_in["Input"]' in content
+    assert 'legend_ch["Channel / Aux"]' in content
+    assert 'legend_bus["Bus"]' in content
+    assert 'legend_main["Main / Matrix"]' in content
+    assert 'legend_io_out["Output"]' in content
+    # Legend swatches get the same classDef colors as the real nodes.
+    class_lines = [line for line in content.splitlines() if line.strip().startswith("class ")]
+    assert any("legend_io_in" in line and line.rstrip().endswith("io_in;") for line in class_lines)
+
+
+def test_render_swaps_hardware_designation_to_title_for_named_input() -> None:
+    graph = RoutingGraph(
+        nodes=[
+            Node(
+                id=("io_in", "LCL", 3),
+                kind="io_in",
+                label="Wendy",
+                detail=("LOCAL IN 3", "preamp +0.0 dB"),
+            ),
+        ],
+        edges=[],
+    )
+
+    content = MermaidRenderer()._build_mermaid(graph)
+
+    assert "<div><b>LOCAL IN 3</b></div>" in content
+    # The name moves down to the first detail line, ahead of the preamp line.
+    assert "Wendy<br/>preamp +0.0 dB" in content
+
+
+def test_render_does_not_swap_title_for_unnamed_input() -> None:
+    graph = RoutingGraph(
+        nodes=[
+            Node(
+                id=("io_in", "LCL", 3),
+                kind="io_in",
+                label="LOCAL IN 3",
+                detail=("preamp +0.0 dB",),
+            ),
+        ],
+        edges=[],
+    )
+
+    content = MermaidRenderer()._build_mermaid(graph)
+
+    assert "<div><b>LOCAL IN 3</b></div>" in content
+    assert "preamp +0.0 dB" in content

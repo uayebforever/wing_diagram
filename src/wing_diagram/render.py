@@ -43,6 +43,18 @@ _NODE_STROKE_COLORS = {
     "mtx": "#d16b6b",
 }
 
+#: Legend entries: one swatch per distinct node colour, labelled the way a
+#: viewer would read it rather than by internal `kind` -- `ch`/`aux` and
+#: `main`/`mtx` each share a single colour (see `_NODE_COLORS`), so they
+#: collapse into one legend row apiece. Same order as `_RANK_GROUPS`.
+_LEGEND_ENTRIES: tuple[tuple[str, str], ...] = (
+    ("io_in", "Input"),
+    ("ch", "Channel / Aux"),
+    ("bus", "Bus"),
+    ("main", "Main / Matrix"),
+    ("io_out", "Output"),
+)
+
 #: Key (sidechain) edges are a control tap into a Gate/Comp, not an audio
 #: signal path -- rendered dashed, in a distinct color, and non-rank-
 #: `constraint`-ing so a bus/main/matrix keying off a later-ranked element
@@ -50,13 +62,25 @@ _NODE_STROKE_COLORS = {
 #: `ai/dynamics-and-levels-plan.md` section 2.
 _KEY_EDGE_COLOR = "#b35900"
 
+#: A send at the Wing's own default -- post-fader, unity gain -- is the
+#: common case and not worth calling out on every single edge; see
+#: `_edge_label_parts`.
+_DEFAULT_SEND_TAP = "POST FADER"
+_DEFAULT_SEND_LEVEL_DB = 0.0
+
+#: Mermaid `classDef` for a shared-label node: no fill, no border, so it
+#: reads as a floating label rather than another diagram element. See
+#: `_shared_label_groups`.
+_SHARED_LABEL_CLASS = "sharedlabel"
+
 
 class Renderer(ABC):
     """Renders a `RoutingGraph` to a file. Implementation-agnostic boundary."""
 
     @abstractmethod
-    def render(self, graph: RoutingGraph, out_path: Path) -> Path:
-        """Render `graph` to `out_path` and return the path actually written."""
+    def render(self, graph: RoutingGraph, out_path: Path, title: str | None = None) -> Path:
+        """Render `graph` to `out_path` and return the path actually written.
+        `title`, if given, is shown on the diagram itself."""
         raise NotImplementedError()
 
 
@@ -80,22 +104,26 @@ class GraphvizRenderer(Renderer):
         time, falling back to `"svg"` if it has none."""
         self._format = format
 
-    def render(self, graph: RoutingGraph, out_path: Path) -> Path:
+    def render(self, graph: RoutingGraph, out_path: Path, title: str | None = None) -> Path:
         out_path = Path(out_path)
         format = self._format or out_path.suffix.lstrip(".") or "svg"
-        dot = self._build_dot(graph, format)
+        dot = self._build_dot(graph, format, title)
         rendered = dot.render(
             filename=out_path.stem, directory=str(out_path.parent) or ".", cleanup=True
         )
         return Path(rendered)
 
-    def _build_dot(self, graph: RoutingGraph, format: str) -> graphviz.Digraph:
+    def _build_dot(
+        self, graph: RoutingGraph, format: str, title: str | None = None
+    ) -> graphviz.Digraph:
         dot = graphviz.Digraph(
             name="wing_routing",
             format=format,
             graph_attr={"rankdir": "LR", "splines": "spline"},
             node_attr={"shape": "box", "style": "filled", "fontname": "Helvetica"},
         )
+        if title:
+            dot.attr(label=title, labelloc="t", fontsize="20", fontname="Helvetica-Bold")
 
         nodes_by_kind: dict[str, list[Node]] = {}
         for node in graph.nodes:
@@ -114,7 +142,10 @@ class GraphvizRenderer(Renderer):
                         fillcolor=_NODE_COLORS.get(node.kind, "#ffffff"),
                     )
 
-        for edge in graph.edges:
+        shared_label_groups = _shared_label_groups(graph.edges)
+        shared_label_indices = {i for indices in shared_label_groups.values() for i in indices}
+
+        for edge_index, edge in enumerate(graph.edges):
             if edge.meta.get("kind") == "key":
                 dot.edge(
                     _dot_node_id(edge.source),
@@ -127,12 +158,27 @@ class GraphvizRenderer(Renderer):
                     constraint="false",
                 )
                 continue
+            if edge_index in shared_label_indices:
+                continue
             dot.edge(
                 _dot_node_id(edge.source),
                 _dot_node_id(edge.dest),
                 label=_edge_label(edge),
                 fontsize="10",
             )
+
+        for (source, parts), indices in shared_label_groups.items():
+            label_id = f"label_{_dot_node_id(source)}_{indices[0]}"
+            dot.node(
+                label_id,
+                label="\\n".join(parts),
+                shape="plaintext",
+                style="",
+                fontsize="10",
+            )
+            dot.edge(_dot_node_id(source), label_id, arrowhead="none")
+            for index in indices:
+                dot.edge(label_id, _dot_node_id(graph.edges[index].dest), fontsize="10")
 
         return dot
 
@@ -161,16 +207,47 @@ def _edge_label_parts(edge: Edge) -> list[str]:
     channel = edge.meta.get("channel")
     if channel:
         parts.append(channel)
-    level_db = edge.meta.get("level_db")
-    if level_db is not None:
-        parts.append(_format_level(level_db))
-    tap = edge.meta.get("tap")
-    if tap:
-        parts.append(tap)
+    if not _is_default_send(edge):
+        level_db = edge.meta.get("level_db")
+        if level_db is not None:
+            parts.append(_format_level(level_db))
+        tap = edge.meta.get("tap")
+        if tap:
+            parts.append(tap)
     trim_db = edge.meta.get("trim_db")
     if trim_db is not None:
         parts.append(f"trim {trim_db:+.1f} dB")
     return parts
+
+
+def _is_default_send(edge: Edge) -> bool:
+    """A send at the Wing's own default -- post-fader, unity gain -- isn't
+    worth a label of its own; see `_DEFAULT_SEND_TAP`."""
+    return (
+        edge.meta.get("tap") == _DEFAULT_SEND_TAP
+        and edge.meta.get("level_db") == _DEFAULT_SEND_LEVEL_DB
+    )
+
+
+def _shared_label_groups(edges: list[Edge]) -> dict[tuple[NodeId, tuple[str, ...]], list[int]]:
+    """Groups non-key edges by `(source, label parts)`, keeping only groups
+    of two or more -- i.e. a source fanning out several connections that
+    all carry the exact same (non-default) tap point and send level.
+
+    Rather than repeating that label on every one of those edges, the
+    caller routes them all through a single shared "label node" (see
+    `_GraphvizRenderer._build_dot`/`MermaidRenderer._build_mermaid`), so
+    the label is only ever shown once per distinct value per source.
+    """
+    groups: dict[tuple[NodeId, tuple[str, ...]], list[int]] = {}
+    for index, edge in enumerate(edges):
+        if edge.meta.get("kind") == "key":
+            continue
+        parts = tuple(_edge_label_parts(edge))
+        if not parts:
+            continue
+        groups.setdefault((edge.source, parts), []).append(index)
+    return {key: indices for key, indices in groups.items() if len(indices) > 1}
 
 
 def _format_level(level_db: float) -> str:
@@ -194,6 +271,12 @@ def _dot_node_id(node_id: NodeId) -> str:
 #: (see `MermaidRenderer`): config stays plain small type, dynamics gets
 #: its own small-italic style below a divider.
 _DYNAMICS_DETAIL_PREFIXES = ("GATE", "COMP")
+
+#: A named `io_in`'s `detail` always leads with its hardware designation
+#: (e.g. "Local In 3") -- see `routing._make_node` -- and the only other
+#: `io_in` detail line is `_preamp_gain_detail`'s fixed "preamp " prefix, so
+#: a config line that doesn't start with it is that hardware designation.
+_PREAMP_DETAIL_PREFIX = "preamp "
 
 
 class MermaidRenderer(Renderer):
@@ -238,17 +321,17 @@ class MermaidRenderer(Renderer):
     suffix with a pointer to how to convert the `.mmd` output.
     """
 
-    def render(self, graph: RoutingGraph, out_path: Path) -> Path:
+    def render(self, graph: RoutingGraph, out_path: Path, title: str | None = None) -> Path:
         out_path = Path(out_path)
         suffix = out_path.suffix.lower()
-        source = self._build_mermaid(graph)
+        source = self._build_mermaid(graph, title)
 
         if suffix in ("", ".mmd", ".mermaid"):
             target = out_path if suffix else out_path.with_suffix(".mmd")
             target.write_text(source)
             return target
         if suffix == ".html":
-            out_path.write_text(_wrap_html(source))
+            out_path.write_text(_wrap_html(source, title))
             return out_path
         raise UserError(
             f"MermaidRenderer can't write {suffix!r} directly -- write a '.mmd' "
@@ -257,9 +340,13 @@ class MermaidRenderer(Renderer):
             "https://mermaid.live."
         )
 
-    def _build_mermaid(self, graph: RoutingGraph) -> str:
-        lines: list[str] = [
-            "---",
+    def _build_mermaid(self, graph: RoutingGraph, title: str | None = None) -> str:
+        lines: list[str] = ["---"]
+        if title:
+            #: Mermaid's own frontmatter `title` -- renders as a heading above
+            #: the diagram, so it needs no node of its own.
+            lines.append(f"title: {_yaml_quoted(title)}")
+        lines += [
             "config:",
             "  layout: elk",
             "  elk:",
@@ -300,6 +387,23 @@ class MermaidRenderer(Renderer):
                 lines.append(f'  {mid}["{_node_html_label(node)}"]')
                 class_members.setdefault(node.kind, []).append(mid)
 
+        #: The legend is the one deliberate exception to "nodes are declared
+        #: flat" above: it has no edges into the signal-flow graph, so
+        #: `forceNodeModelOrder`/ELK have nothing to preserve order *for*,
+        #: and wrapping it in its own `subgraph` is what keeps its swatches
+        #: visually grouped as a single box rather than scattered wherever
+        #: ELK places disconnected nodes.
+        lines.append("  subgraph legend[Legend]")
+        lines.append("    direction TB")
+        for kind, text in _LEGEND_ENTRIES:
+            lid = f"legend_{kind}"
+            lines.append(f'    {lid}["{_esc(text)}"]')
+            class_members.setdefault(kind, []).append(lid)
+        lines.append("  end")
+
+        shared_label_groups = _shared_label_groups(graph.edges)
+        shared_label_indices = {i for indices in shared_label_groups.values() for i in indices}
+
         key_edge_indices: list[int] = []
         for edge_index, edge in enumerate(graph.edges):
             src = _mermaid_id(edge.source)
@@ -309,12 +413,28 @@ class MermaidRenderer(Renderer):
                 lines.append(f'  {src} -.->|"{_small_html(label)}"| {dst}')
                 key_edge_indices.append(edge_index)
                 continue
+            if edge_index in shared_label_indices:
+                continue
             parts = _edge_label_parts(edge)
             if parts:
                 label_html = _small_html("<br/>".join(_esc(p) for p in parts), escape=False)
                 lines.append(f'  {src} -->|"{label_html}"| {dst}')
             else:
                 lines.append(f"  {src} --> {dst}")
+
+        #: Several edges sharing a source and an identical (non-default)
+        #: tap/level label are routed through one shared label node instead
+        #: of repeating the label on each -- see `_shared_label_groups`.
+        for (source, parts), indices in shared_label_groups.items():
+            lid = f"n_label_{_mermaid_id(source)}_{indices[0]}"
+            label_html = _small_html("<br/>".join(_esc(p) for p in parts), escape=False)
+            lines.append(f'  {lid}["{label_html}"]')
+            class_members.setdefault(_SHARED_LABEL_CLASS, []).append(lid)
+            lines.append(f"  {_mermaid_id(source)} --> {lid}")
+            for index in indices:
+                lines.append(f"  {lid} --> {_mermaid_id(graph.edges[index].dest)}")
+
+        lines.append(f"  classDef {_SHARED_LABEL_CLASS} fill:none,stroke:none;")
 
         for kind, members in class_members.items():
             lines.append(f"  class {','.join(members)} {kind};")
@@ -331,11 +451,25 @@ class MermaidRenderer(Renderer):
 def _node_html_label(node: Node) -> str:
     """Builds a node's HTML label: a bold title line, then plain config
     detail (if any) in small grey type, then dynamics badges (if any)
-    below a divider rule in smaller italic type. See `MermaidRenderer`."""
-    parts = [f"<div><b>{_esc(_node_title(node))}</b></div>"]
+    below a divider rule in smaller italic type. See `MermaidRenderer`.
 
+    For a named `io_in`, the title and first detail line are swapped from
+    `_node_title`'s default: the hardware designation (e.g. "Local In 3")
+    is what you'd patch to, so it's shown as the title, with the person's
+    own name (e.g. "Wendy") moved down to the first detail line."""
+    title = _node_title(node)
     config_lines = [d for d in node.detail if not d.startswith(_DYNAMICS_DETAIL_PREFIXES)]
     dynamics_lines = [d for d in node.detail if d.startswith(_DYNAMICS_DETAIL_PREFIXES)]
+
+    if (
+        node.kind == "io_in"
+        and config_lines
+        and not config_lines[0].startswith(_PREAMP_DETAIL_PREFIX)
+    ):
+        title, name = config_lines[0], title
+        config_lines = [name, *config_lines[1:]]
+
+    parts = [f"<div><b>{_esc(title)}</b></div>"]
 
     if config_lines:
         joined = "<br/>".join(_esc(d) for d in config_lines)
@@ -379,16 +513,23 @@ def _mermaid_id(node_id: NodeId) -> str:
     return "n_" + "_".join(str(part) for part in node_id)
 
 
-def _wrap_html(mermaid_source: str) -> str:
+def _yaml_quoted(text: str) -> str:
+    """Double-quoted YAML scalar for Mermaid's frontmatter `title`."""
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _wrap_html(mermaid_source: str, title: str | None = None) -> str:
     """A self-contained preview page: loads Mermaid and its `elk` layout
     plugin from a CDN and renders `mermaid_source` client-side. No local
     Mermaid/Node install needed -- just a browser with network access."""
     escaped_source = html.escape(mermaid_source)
+    page_title = html.escape(title) if title else "WING routing diagram"
     return f"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>WING routing diagram</title>
+  <title>{page_title}</title>
   <style>
     body {{ margin: 0; padding: 1rem; font-family: sans-serif; }}
     #diagram svg {{ max-width: 100%; height: auto; }}
