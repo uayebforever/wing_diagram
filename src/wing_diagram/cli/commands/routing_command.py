@@ -45,6 +45,11 @@ class RoutingCommand(Command):
             default=None,
             help="Path to propmap.jsonl (default: the copy bundled with this package)",
         )
+        parser.add_argument(
+            "--title",
+            default=None,
+            help="Title shown on the diagram (default: the snapfile's filename)",
+        )
 
     def execute(self, args) -> None:
         snapshot = load_snapshot(args.snapfile)
@@ -55,6 +60,7 @@ class RoutingCommand(Command):
             GraphvizRenderer() if args.renderer == "graphviz" else MermaidRenderer()
         )
         out = args.out or _DEFAULT_OUT_BY_RENDERER[args.renderer]
-        out_path = renderer.render(graph, out)
+        title = args.title or args.snapfile.stem
+        out_path = renderer.render(graph, out, title=title)
         log.info("Routing graph: %d nodes, %d edges", len(graph.nodes), len(graph.edges))
         print(f"Wrote routing diagram to {out_path}")
