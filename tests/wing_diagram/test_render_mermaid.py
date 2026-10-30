@@ -160,11 +160,11 @@ def test_render_does_not_duplicate_bare_fallback_label(tmp_path: Path) -> None:
 
 
 def test_render_declares_nodes_in_the_graphs_given_order() -> None:
-    """Node *declaration* order is what `elk.forceNodeModelOrder` (see
-    `MermaidRenderer`) preserves as the final top-to-bottom layout order --
-    so `_build_mermaid` must declare nodes in `graph.nodes`' given order
-    (which `routing.build_routing_graph` already sorts ascending by index)
-    rather than reordering them itself."""
+    """Node *declaration* order is the starting point ELK's crossing-
+    minimization works from (see `MermaidRenderer`) -- so `_build_mermaid`
+    must declare nodes in `graph.nodes`' given order (which
+    `routing.build_routing_graph` already sorts ascending by index) rather
+    than reordering them itself."""
     graph = RoutingGraph(
         nodes=[
             Node(id=("ch", 1), kind="ch", label="Wren"),
@@ -183,19 +183,25 @@ def test_render_declares_nodes_in_the_graphs_given_order() -> None:
 
 
 def test_render_does_not_wrap_nodes_in_subgraphs() -> None:
-    """A Mermaid `subgraph` is its own nested ELK layout problem and was
-    observed to silently stop `forceNodeModelOrder` from applying to the
-    nodes inside it -- see `MermaidRenderer`'s docstring."""
+    """A Mermaid `subgraph` is its own nested ELK layout problem and stops
+    `_RANK_GROUPS` from influencing layer order across group boundaries --
+    see `MermaidRenderer`'s docstring."""
     content = MermaidRenderer()._build_mermaid(_sample_graph())
 
     assert "subgraph" not in content
 
 
-def test_render_sets_elk_model_order_options() -> None:
+def test_render_sets_elk_merge_edges_without_forcing_node_order() -> None:
+    """`mergeEdges` bundles edges sharing a source/destination into a
+    shared trunk, but pinning node order on top of that (`elk.
+    forceNodeModelOrder`) left dense many-to-many fan-in with no room to
+    spread its trunks apart, so unrelated edges' merged trunks could run
+    visually parallel and overlap -- see `MermaidRenderer`'s docstring."""
     content = MermaidRenderer()._build_mermaid(_sample_graph())
 
-    assert "forceNodeModelOrder: true" in content
-    assert "preset: modelOrder" in content
+    assert "mergeEdges: true" in content
+    assert "forceNodeModelOrder" not in content
+    assert "preset: modelOrder" not in content
 
 
 def test_render_includes_title_in_frontmatter_when_given() -> None:

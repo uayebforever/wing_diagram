@@ -216,21 +216,21 @@ class MermaidRenderer(Renderer):
 
     Node kinds keep the same fill/stroke colors as `GraphvizRenderer` (via
     `classDef`/`class`), and nodes are declared in the same left-to-right
-    `_RANK_GROUPS` order to keep the signal-flow layout -- as a declaration
-    order rather than a Mermaid `subgraph`, since ELK treats a `subgraph` as
-    its own nested layout problem and silently stops respecting node order
-    inside it (see `elk.forceNodeModelOrder` below).
+    `_RANK_GROUPS` order -- as a declaration order rather than a Mermaid
+    `subgraph`, since ELK treats a `subgraph` as its own nested layout
+    problem and silently stops respecting node order inside it.
 
-    `elk.forceNodeModelOrder` (+ the `modelOrder` preset) keeps nodes within
-    a layer in declaration order -- i.e. ascending by index, since
-    `graph.nodes` already comes pre-sorted that way -- rather than ELK's
-    default crossing-minimization reordering them freely. This also happens
-    to be what keeps a signal-in edge and a signal-out edge from ever
-    landing on the same side of a node: ELK's free reordering was what let
-    e.g. a monitor-feed edge (bus/main/mtx back into a channel) and a
-    sidechain "key" edge end up sharing a node's east side, making the two
-    arrowheads ambiguous; with model order enforced, a same-layer edge like
-    a key tap instead routes via the node's north/south side.
+    ELK's own crossing-minimization is left free to reorder nodes within a
+    layer (no `elk.forceNodeModelOrder`): we tried pinning nodes to
+    declaration order so same-kind nodes stayed sorted by index, but with
+    `mergeEdges` on, a dense many-to-many fan-in (e.g. most channels feeding
+    both a bus and the mains) then had no room to spread its trunks apart,
+    so unrelated edges' merged trunks ran visually parallel and overlapped
+    -- exactly the "which channel connects to what" ambiguity crossing-
+    minimization exists to avoid. Letting ELK reorder nodes freely resolves
+    that: it groups nodes by shared destination instead of raw index, which
+    reads a little less like a numeric channel list but keeps every edge
+    (merged or not) visually distinct.
 
     A node's label is rendered as HTML (Mermaid's `htmlLabels`, on by
     default) so detail lines can use a different style than the main
@@ -285,17 +285,6 @@ class MermaidRenderer(Renderer):
             "  layout: elk",
             "  elk:",
             "    mergeEdges: true",
-            #: `modelOrder` + `forceNodeModelOrder` keep nodes within a layer in
-            #: the order we declare them (ascending by index, since
-            #: `graph.nodes` already comes pre-sorted that way) instead of
-            #: ELK's default crossing-minimization freely reordering them.
-            #: Also incidentally what gets the sidechain/monitor-feed "key"
-            #: edges routed via a node's north/south side rather than sharing
-            #: an east/west port with its main signal edges -- see the
-            #: "never share an attachment point" note on `MermaidRenderer`.
-            "    preset: modelOrder",
-            "    forceNodeModelOrder: true",
-            "    considerModelOrder: NODES_AND_EDGES",
             "---",
             "flowchart LR",
         ]
@@ -310,10 +299,10 @@ class MermaidRenderer(Renderer):
 
         #: Nodes are declared flat (not wrapped in a Mermaid `subgraph` per
         #: rank group) -- ELK treats a `subgraph` as its own nested layout
-        #: problem, which was overriding `forceNodeModelOrder` and reordering
-        #: nodes within it regardless. `_RANK_GROUPS` still controls the
-        #: order nodes are *declared* in, which `forceNodeModelOrder` then
-        #: preserves in the actual layout.
+        #: problem, which stops `_RANK_GROUPS` from influencing layer order
+        #: across group boundaries. `_RANK_GROUPS` still controls the order
+        #: nodes are *declared* in, which ELK's crossing-minimization takes
+        #: as its starting point (see `MermaidRenderer`'s docstring).
         class_members: dict[str, list[str]] = {}
         for kinds in _RANK_GROUPS:
             for node in (n for kind in kinds for n in nodes_by_kind.get(kind, [])):
