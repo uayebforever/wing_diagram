@@ -353,6 +353,19 @@ def test_render_widens_elk_edge_spacing() -> None:
     assert "layered.spacing.nodeNodeBetweenLayers: 80" in content
 
 
+def test_render_does_not_merge_unrelated_edges() -> None:
+    """`elk.mergeEdges` bundles any edges ELK routes through the same
+    inter-rank gap into a shared visual trunk, regardless of whether they
+    actually share an endpoint -- so a page of distinct one-to-one
+    connections (e.g. each physical input patched to its own, different
+    channel) was drawn as one undifferentiated trunk fanning out at both
+    ends, reading as a many-to-many relationship that doesn't exist. It
+    must stay off so every edge here gets its own traceable line."""
+    content = MermaidRenderer()._build_mermaid(_sample_graph())
+
+    assert "mergeEdges" not in content
+
+
 def test_render_includes_title_in_frontmatter_when_given() -> None:
     content = MermaidRenderer()._build_mermaid(_sample_graph(), title="Announcements")
 

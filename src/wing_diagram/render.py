@@ -288,11 +288,20 @@ class MermaidRenderer(Renderer):
     """Renders a `RoutingGraph` as a Mermaid flowchart.
 
     Uses Mermaid's `elk` layout engine for orthogonal edge routing with
-    rounded corners (straight segments, not Graphviz's curved splines),
-    and `elk.mergeEdges` so that edges sharing a source or destination
-    bundle into a shared trunk instead of criss-crossing independently --
-    the closest built-in approximation of "edges should only overlap when
-    they share an end".
+    rounded corners (straight segments, not Graphviz's curved splines).
+
+    `elk.mergeEdges` is deliberately left off: it bundles any edges ELK
+    routes through the same inter-rank gap into a shared visual trunk,
+    regardless of whether they actually share an endpoint -- so a page of
+    distinct one-to-one connections (e.g. each physical input patched to
+    its own, different channel) was drawn as one undifferentiated trunk
+    fanning out at both ends, reading as "these inputs connect to these
+    channels" as a group rather than as the distinct pairs they are. Every
+    edge here gets its own traceable line; `_shared_label_groups` below is
+    the one deliberate, explicit exception -- it bundles edges only when
+    they share both a source *and* an identical label, which is a real
+    shared relationship worth drawing as one fan, not a routing-engine
+    space-saving trick.
 
     Node kinds keep the same fill/stroke colors as `GraphvizRenderer` (via
     `classDef`/`class`), and nodes are declared in the same left-to-right
@@ -369,7 +378,6 @@ class MermaidRenderer(Renderer):
             "config:",
             "  layout: elk",
             "  elk:",
-            "    mergeEdges: true",
             #: `modelOrder` + `forceNodeModelOrder` keep nodes within a layer in
             #: the order we declare them (ascending by index, since
             #: `graph.nodes` already comes pre-sorted that way) instead of
@@ -382,13 +390,14 @@ class MermaidRenderer(Renderer):
             "    forceNodeModelOrder: true",
             "    considerModelOrder: NODES_AND_EDGES",
             #: ELK's default spacing packs parallel edges passing through the
-            #: same inter-rank gap close enough to visually fuse into what
-            #: looks like one or two thick lines whenever several nodes
-            #: share a dense fan-out/fan-in (e.g. several channels each
-            #: sending to the same several mains/matrices) -- not a
-            #: crossing, just indistinguishable parallel segments. Wider
+            #: same inter-rank gap close enough to run visually flush
+            #: against each other -- not a crossing, just distinct edges
+            #: (see `mergeEdges` above) with no room between them, which
+            #: reads the same as a crossing/overlap from a glance. Wider
             #: edge-edge and node-node spacing gives each parallel segment
-            #: and each bend point visibly distinct room.
+            #: and each bend point visibly distinct room, so a dense
+            #: fan-out/fan-in (e.g. several channels each sending to the
+            #: same several mains/matrices) stays busy but traceable.
             "    spacing.edgeEdge: 25",
             "    layered.spacing.edgeEdgeBetweenLayers: 25",
             "    layered.spacing.edgeNodeBetweenLayers: 25",
