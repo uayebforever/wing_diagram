@@ -100,7 +100,7 @@ class GraphvizRenderer(Renderer):
             node_attr={"shape": "box", "style": "filled", "fontname": "Helvetica"},
         )
         if title:
-            dot.attr(label=title, labelloc="t", fontsize="20", fontname="Helvetica-Bold")
+            dot.attr(label=title, labelloc="t", fontsize="32", fontname="Helvetica-Bold")
 
         nodes_by_kind: dict[str, list[Node]] = {}
         for node in graph.nodes:
@@ -270,6 +270,15 @@ class MermaidRenderer(Renderer):
             lines.append(f"title: {_yaml_quoted(title)}")
         lines += [
             "config:",
+        ]
+        if title:
+            #: Mermaid's default title size is barely larger than node text --
+            #: bump it via `themeCSS` (the one config knob Mermaid exposes for
+            #: arbitrary CSS) since there's no dedicated "title font size" option.
+            lines.append(
+                '  themeCSS: ".flowchartTitleText { font-size: 32px; font-weight: bold; }"'
+            )
+        lines += [
             "  layout: elk",
             "  elk:",
             "    mergeEdges: true",
