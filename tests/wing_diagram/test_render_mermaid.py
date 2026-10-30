@@ -103,6 +103,25 @@ def test_render_splits_config_detail_from_dynamics_detail(tmp_path: Path) -> Non
     assert "Ch 1: Wren" in content
 
 
+def test_render_omits_edge_label_for_standard_unity_post_fader_send(tmp_path: Path) -> None:
+    graph = RoutingGraph(
+        nodes=[
+            Node(id=("ch", 1), kind="ch", label="Wren"),
+            Node(id=("main", 1), kind="main", label="Sanctuary Mix"),
+        ],
+        edges=[
+            Edge(("ch", 1), ("main", 1), {"level_db": 0.0, "tap": "POST FADER"}),
+        ],
+    )
+
+    content = MermaidRenderer()._build_mermaid(graph)
+
+    assert "POST FADER" not in content
+    assert "0.0 dB" not in content
+    assert "-->|" not in content
+    assert "--> " in content
+
+
 def test_render_key_source_edge_is_dashed_and_colored(tmp_path: Path) -> None:
     graph = RoutingGraph(
         nodes=[

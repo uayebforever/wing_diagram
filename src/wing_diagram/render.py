@@ -167,11 +167,14 @@ def _edge_label_parts(edge: Edge) -> list[str]:
     if channel:
         parts.append(channel)
     level_db = edge.meta.get("level_db")
-    if level_db is not None:
-        parts.append(_format_level(level_db))
     tap = edge.meta.get("tap")
-    if tap:
-        parts.append(tap)
+    # 0.0 dB post-fader is the unity/default send config -- not worth
+    # labelling since it's what every unconfigured send looks like.
+    if not (level_db == 0.0 and tap == "POST FADER"):
+        if level_db is not None:
+            parts.append(_format_level(level_db))
+        if tap:
+            parts.append(tap)
     trim_db = edge.meta.get("trim_db")
     if trim_db is not None:
         parts.append(f"trim {trim_db:+.1f} dB")
