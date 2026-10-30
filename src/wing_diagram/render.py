@@ -55,8 +55,9 @@ class Renderer(ABC):
     """Renders a `RoutingGraph` to a file. Implementation-agnostic boundary."""
 
     @abstractmethod
-    def render(self, graph: RoutingGraph, out_path: Path) -> Path:
-        """Render `graph` to `out_path` and return the path actually written."""
+    def render(self, graph: RoutingGraph, out_path: Path, title: str | None = None) -> Path:
+        """Render `graph` to `out_path` and return the path actually written.
+        `title`, if given, is shown on the diagram itself."""
         raise NotImplementedError()
 
 
@@ -80,22 +81,26 @@ class GraphvizRenderer(Renderer):
         time, falling back to `"svg"` if it has none."""
         self._format = format
 
-    def render(self, graph: RoutingGraph, out_path: Path) -> Path:
+    def render(self, graph: RoutingGraph, out_path: Path, title: str | None = None) -> Path:
         out_path = Path(out_path)
         format = self._format or out_path.suffix.lstrip(".") or "svg"
-        dot = self._build_dot(graph, format)
+        dot = self._build_dot(graph, format, title)
         rendered = dot.render(
             filename=out_path.stem, directory=str(out_path.parent) or ".", cleanup=True
         )
         return Path(rendered)
 
-    def _build_dot(self, graph: RoutingGraph, format: str) -> graphviz.Digraph:
+    def _build_dot(
+        self, graph: RoutingGraph, format: str, title: str | None = None
+    ) -> graphviz.Digraph:
         dot = graphviz.Digraph(
             name="wing_routing",
             format=format,
             graph_attr={"rankdir": "LR", "splines": "spline"},
             node_attr={"shape": "box", "style": "filled", "fontname": "Helvetica"},
         )
+        if title:
+            dot.attr(label=title, labelloc="t", fontsize="20", fontname="Helvetica-Bold")
 
         nodes_by_kind: dict[str, list[Node]] = {}
         for node in graph.nodes:
@@ -238,17 +243,17 @@ class MermaidRenderer(Renderer):
     suffix with a pointer to how to convert the `.mmd` output.
     """
 
-    def render(self, graph: RoutingGraph, out_path: Path) -> Path:
+    def render(self, graph: RoutingGraph, out_path: Path, title: str | None = None) -> Path:
         out_path = Path(out_path)
         suffix = out_path.suffix.lower()
-        source = self._build_mermaid(graph)
+        source = self._build_mermaid(graph, title)
 
         if suffix in ("", ".mmd", ".mermaid"):
             target = out_path if suffix else out_path.with_suffix(".mmd")
             target.write_text(source)
             return target
         if suffix == ".html":
-            out_path.write_text(_wrap_html(source))
+            out_path.write_text(_wrap_html(source, title))
             return out_path
         raise UserError(
             f"MermaidRenderer can't write {suffix!r} directly -- write a '.mmd' "
@@ -257,9 +262,13 @@ class MermaidRenderer(Renderer):
             "https://mermaid.live."
         )
 
-    def _build_mermaid(self, graph: RoutingGraph) -> str:
-        lines: list[str] = [
-            "---",
+    def _build_mermaid(self, graph: RoutingGraph, title: str | None = None) -> str:
+        lines: list[str] = ["---"]
+        if title:
+            #: Mermaid's own frontmatter `title` -- renders as a heading above
+            #: the diagram, so it needs no node of its own.
+            lines.append(f"title: {_yaml_quoted(title)}")
+        lines += [
             "config:",
             "  layout: elk",
             "  elk:",
@@ -379,16 +388,23 @@ def _mermaid_id(node_id: NodeId) -> str:
     return "n_" + "_".join(str(part) for part in node_id)
 
 
-def _wrap_html(mermaid_source: str) -> str:
+def _yaml_quoted(text: str) -> str:
+    """Double-quoted YAML scalar for Mermaid's frontmatter `title`."""
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _wrap_html(mermaid_source: str, title: str | None = None) -> str:
     """A self-contained preview page: loads Mermaid and its `elk` layout
     plugin from a CDN and renders `mermaid_source` client-side. No local
     Mermaid/Node install needed -- just a browser with network access."""
     escaped_source = html.escape(mermaid_source)
+    page_title = html.escape(title) if title else "WING routing diagram"
     return f"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>WING routing diagram</title>
+  <title>{page_title}</title>
   <style>
     body {{ margin: 0; padding: 1rem; font-family: sans-serif; }}
     #diagram svg {{ max-width: 100%; height: auto; }}

@@ -177,3 +177,21 @@ def test_render_sets_elk_model_order_options() -> None:
 
     assert "forceNodeModelOrder: true" in content
     assert "preset: modelOrder" in content
+
+
+def test_render_includes_title_in_frontmatter_when_given() -> None:
+    content = MermaidRenderer()._build_mermaid(_sample_graph(), title="Announcements")
+
+    assert 'title: "Announcements"' in content
+
+
+def test_render_omits_title_when_not_given() -> None:
+    content = MermaidRenderer()._build_mermaid(_sample_graph())
+
+    assert "title:" not in content
+
+
+def test_render_escapes_quotes_in_title() -> None:
+    content = MermaidRenderer()._build_mermaid(_sample_graph(), title='Front "House" Mix')
+
+    assert 'title: "Front \\"House\\" Mix"' in content

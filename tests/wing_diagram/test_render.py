@@ -78,6 +78,15 @@ def test_render_shows_node_detail_and_edge_level_label(tmp_path: Path) -> None:
     assert "POST FADER" in content
 
 
+def test_render_includes_title_when_given(tmp_path: Path) -> None:
+    out_path = GraphvizRenderer().render(
+        _sample_graph(), tmp_path / "diagram.svg", title="Announcements"
+    )
+
+    content = out_path.read_text()
+    assert "Announcements" in content
+
+
 def test_render_key_source_edge_is_dashed_and_labelled(tmp_path: Path) -> None:
     graph = RoutingGraph(
         nodes=[
