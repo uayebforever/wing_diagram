@@ -73,6 +73,11 @@ _DEFAULT_SEND_LEVEL_DB = 0.0
 #: `_shared_label_groups`.
 _SHARED_LABEL_CLASS = "sharedlabel"
 
+#: Mermaid `classDef` for a rank-anchor dummy node: no fill, no border --
+#: purely a layering hint for ELK, never meant to be seen. See
+#: `MermaidRenderer._build_mermaid`'s "rank anchor" note.
+_RANK_ANCHOR_CLASS = "rankanchor"
+
 
 class Renderer(ABC):
     """Renders a `RoutingGraph` to a file. Implementation-agnostic boundary."""
@@ -307,6 +312,20 @@ class MermaidRenderer(Renderer):
     arrowheads ambiguous; with model order enforced, a same-layer edge like
     a key tap instead routes via the node's north/south side.
 
+    `forceNodeModelOrder` only controls a node's position *within* whatever
+    layer ELK's own layered algorithm assigns it (by longest path from a
+    source) -- it does not make ELK respect `_RANK_GROUPS` as the layer
+    assignment itself. A rank group that isn't the longest path to every one
+    of its nodes (e.g. `bus`, reached in one hop from `ch` just like `main`/
+    `mtx` are) can end up sharing a layer with a later rank group, and an
+    edge routed into it then has to cut across that later group's node
+    boxes to get there. A chain of invisible (`~~~`) edges through one dummy
+    "rank anchor" node per rank-group boundary (see `_RANK_ANCHOR_CLASS`)
+    fixes this without subgraphs: every node in rank N+1 gets an edge from
+    rank N's anchor and an edge to rank N+1's anchor, forcing its layer
+    strictly after every node in rank N regardless of what its real edges'
+    own topology would otherwise give it.
+
     A node's label is rendered as HTML (Mermaid's `htmlLabels`, on by
     default) so detail lines can use a different style than the main
     label: plain config detail (preamp gain, trim) is shown in small grey
@@ -383,11 +402,45 @@ class MermaidRenderer(Renderer):
         #: order nodes are *declared* in, which `forceNodeModelOrder` then
         #: preserves in the actual layout.
         class_members: dict[str, list[str]] = {}
+        rank_ids: list[list[str]] = []
         for kinds in _RANK_GROUPS:
+            ids: list[str] = []
             for node in (n for kind in kinds for n in nodes_by_kind.get(kind, [])):
                 mid = _mermaid_id(node.id)
                 lines.append(f'  {mid}["{_node_html_label(node)}"]')
                 class_members.setdefault(node.kind, []).append(mid)
+                ids.append(mid)
+            if ids:
+                rank_ids.append(ids)
+
+        #: ELK's layered algorithm assigns each node's *layer* itself (by
+        #: longest path from a source), ignoring `_RANK_GROUPS`/declaration
+        #: order entirely -- that only controls a node's position *within*
+        #: whatever layer ELK gave it (see `forceNodeModelOrder` above). A
+        #: rank group that isn't the longest path to every one of its nodes
+        #: (e.g. `bus`, reached in one hop from `ch` just like `main`/`mtx`
+        #: are) can end up sharing a layer with a later rank group, and an
+        #: edge into it then has to cut across that later group's node
+        #: boxes to get there. A chain of invisible (`~~~`) edges through
+        #: one dummy "anchor" node per rank boundary fixes this without
+        #: subgraphs (which broke `forceNodeModelOrder`'s within-layer
+        #: ordering, see above): every node in rank N+1 gets an edge from
+        #: rank N's anchor, and an edge to rank N+1's anchor, so its layer
+        #: is forced strictly after every node in rank N regardless of its
+        #: real edges' own topology.
+        anchor_ids = [f"rank_anchor_{i}" for i in range(len(rank_ids) - 1)]
+        for anchor_id in anchor_ids:
+            lines.append(f"  {anchor_id}[ ]")
+            class_members.setdefault(_RANK_ANCHOR_CLASS, []).append(anchor_id)
+        for rank_index, ids in enumerate(rank_ids):
+            if rank_index > 0:
+                for mid in ids:
+                    lines.append(f"  {anchor_ids[rank_index - 1]} ~~~ {mid}")
+            if rank_index < len(anchor_ids):
+                for mid in ids:
+                    lines.append(f"  {mid} ~~~ {anchor_ids[rank_index]}")
+        for prev_anchor, next_anchor in zip(anchor_ids, anchor_ids[1:]):
+            lines.append(f"  {prev_anchor} ~~~ {next_anchor}")
 
         #: The legend is the one deliberate exception to "nodes are declared
         #: flat" above: it has no edges into the signal-flow graph, so
@@ -437,6 +490,7 @@ class MermaidRenderer(Renderer):
                 lines.append(f"  {lid} --> {_mermaid_id(graph.edges[index].dest)}")
 
         lines.append(f"  classDef {_SHARED_LABEL_CLASS} fill:none,stroke:none;")
+        lines.append(f"  classDef {_RANK_ANCHOR_CLASS} fill:none,stroke:none;")
 
         for kind, members in class_members.items():
             lines.append(f"  class {','.join(members)} {kind};")
