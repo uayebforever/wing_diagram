@@ -208,11 +208,22 @@ class MermaidRenderer(Renderer):
     """Renders a `RoutingGraph` as a Mermaid flowchart.
 
     Uses Mermaid's `elk` layout engine for orthogonal edge routing with
-    rounded corners (straight segments, not Graphviz's curved splines),
-    and `elk.mergeEdges` so that edges sharing a source or destination
-    bundle into a shared trunk instead of criss-crossing independently --
-    the closest built-in approximation of "edges should only overlap when
-    they share an end".
+    rounded corners (straight segments, not Graphviz's curved splines).
+
+    `elk.mergeEdges` is deliberately left off. It sounds like exactly what
+    we want -- edges sharing a source or destination bundling into a shared
+    trunk -- but what it actually does is bundle together *any* edges that
+    happen to travel through the same inter-layer routing channel, even
+    when they share neither endpoint. In this graph almost every channel
+    feeds both a bus and the mains, so with `mergeEdges` on, an unrelated
+    channel's trunk to the mains would run visually coincident with
+    another channel's trunk to a bus for most of its length, making it
+    look like the first channel fed that bus too (see the "overlapping
+    connection lines" writeup). A diagram that misrepresents the routing
+    is worse than a busy one, so edges are drawn independently; ELK's
+    `mergeEdges`-aware edge-node spacing still keeps same-source/same-
+    destination edges visually grouped near the node they share, they just
+    don't fuse into one line further out.
 
     Node kinds keep the same fill/stroke colors as `GraphvizRenderer` (via
     `classDef`/`class`), and nodes are declared in the same left-to-right
@@ -221,16 +232,11 @@ class MermaidRenderer(Renderer):
     problem and silently stops respecting node order inside it.
 
     ELK's own crossing-minimization is left free to reorder nodes within a
-    layer (no `elk.forceNodeModelOrder`): we tried pinning nodes to
-    declaration order so same-kind nodes stayed sorted by index, but with
-    `mergeEdges` on, a dense many-to-many fan-in (e.g. most channels feeding
-    both a bus and the mains) then had no room to spread its trunks apart,
-    so unrelated edges' merged trunks ran visually parallel and overlapped
-    -- exactly the "which channel connects to what" ambiguity crossing-
-    minimization exists to avoid. Letting ELK reorder nodes freely resolves
-    that: it groups nodes by shared destination instead of raw index, which
-    reads a little less like a numeric channel list but keeps every edge
-    (merged or not) visually distinct.
+    layer (no `elk.forceNodeModelOrder`), which gives the independent edges
+    above more room to separate instead of being pinned into a corridor
+    that forces them to run parallel. It groups nodes by shared destination
+    instead of raw index, which reads a little less like a numeric channel
+    list but keeps crossings down.
 
     A node's label is rendered as HTML (Mermaid's `htmlLabels`, on by
     default) so detail lines can use a different style than the main
@@ -284,7 +290,9 @@ class MermaidRenderer(Renderer):
         lines += [
             "  layout: elk",
             "  elk:",
-            "    mergeEdges: true",
+            #: Left off -- see `MermaidRenderer`'s docstring for why
+            #: `mergeEdges` is unsafe for this graph's density.
+            "    mergeEdges: false",
             "---",
             "flowchart LR",
         ]

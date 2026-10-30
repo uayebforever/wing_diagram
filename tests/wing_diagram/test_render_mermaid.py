@@ -191,15 +191,16 @@ def test_render_does_not_wrap_nodes_in_subgraphs() -> None:
     assert "subgraph" not in content
 
 
-def test_render_sets_elk_merge_edges_without_forcing_node_order() -> None:
-    """`mergeEdges` bundles edges sharing a source/destination into a
-    shared trunk, but pinning node order on top of that (`elk.
-    forceNodeModelOrder`) left dense many-to-many fan-in with no room to
-    spread its trunks apart, so unrelated edges' merged trunks could run
-    visually parallel and overlap -- see `MermaidRenderer`'s docstring."""
+def test_render_does_not_merge_edges_or_force_node_order() -> None:
+    """`elk.mergeEdges` bundles together any edges sharing a routing
+    channel, not just edges that share an endpoint -- in this graph's
+    dense many-to-many fan-in that made an unrelated channel's trunk look
+    like it fed a bus it never actually sends to. `forceNodeModelOrder`
+    is also left off so ELK's crossing-minimization has room to keep
+    independent edges apart -- see `MermaidRenderer`'s docstring."""
     content = MermaidRenderer()._build_mermaid(_sample_graph())
 
-    assert "mergeEdges: true" in content
+    assert "mergeEdges: false" in content
     assert "forceNodeModelOrder" not in content
     assert "preset: modelOrder" not in content
 
