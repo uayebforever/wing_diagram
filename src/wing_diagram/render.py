@@ -73,11 +73,6 @@ _DEFAULT_SEND_LEVEL_DB = 0.0
 #: `_shared_label_groups`.
 _SHARED_LABEL_CLASS = "sharedlabel"
 
-#: Mermaid `classDef` for a rank-anchor dummy node: no fill, no border --
-#: purely a layering hint for ELK, never meant to be seen. See
-#: `MermaidRenderer._build_mermaid`'s "rank anchor" note.
-_RANK_ANCHOR_CLASS = "rankanchor"
-
 
 class Renderer(ABC):
     """Renders a `RoutingGraph` to a file. Implementation-agnostic boundary."""
@@ -290,18 +285,20 @@ class MermaidRenderer(Renderer):
     Uses Mermaid's `elk` layout engine for orthogonal edge routing with
     rounded corners (straight segments, not Graphviz's curved splines).
 
-    `elk.mergeEdges` is deliberately left off: it bundles any edges ELK
-    routes through the same inter-rank gap into a shared visual trunk,
-    regardless of whether they actually share an endpoint -- so a page of
-    distinct one-to-one connections (e.g. each physical input patched to
-    its own, different channel) was drawn as one undifferentiated trunk
-    fanning out at both ends, reading as "these inputs connect to these
-    channels" as a group rather than as the distinct pairs they are. Every
-    edge here gets its own traceable line; `_shared_label_groups` below is
-    the one deliberate, explicit exception -- it bundles edges only when
-    they share both a source *and* an identical label, which is a real
-    shared relationship worth drawing as one fan, not a routing-engine
-    space-saving trick.
+    `elk.mergeEdges` bundles edges that share a real endpoint (same source
+    or same target) into a shared visual trunk near that node instead of
+    drawing them as independent parallel lines -- correct and wanted when
+    they truly share that endpoint (e.g. one channel's several sends to
+    several mains/matrices). It briefly looked unsafe to use alongside a
+    "rank anchor" scheme that forced each `_RANK_GROUPS` column onto its
+    own ELK layer: every node in a rank shared an edge with that rank's one
+    dummy anchor node, so `mergeEdges` dutifully bundled *all* of those
+    nodes' real edges together near the shared anchor too -- drawing
+    unrelated one-to-one connections (e.g. each physical input patched to
+    its own, different channel) as one undifferentiated trunk. Removing the
+    anchor scheme (see `elk.spacing.edgeEdge` below for why it turned out
+    not to be needed) fixed that: `mergeEdges` now only ever bundles edges
+    that share a real node, never ELK-assigned layer bookkeeping.
 
     Node kinds keep the same fill/stroke colors as `GraphvizRenderer` (via
     `classDef`/`class`), and nodes are declared in the same left-to-right
@@ -322,18 +319,32 @@ class MermaidRenderer(Renderer):
     a key tap instead routes via the node's north/south side.
 
     `forceNodeModelOrder` only controls a node's position *within* whatever
-    layer ELK's own layered algorithm assigns it (by longest path from a
-    source) -- it does not make ELK respect `_RANK_GROUPS` as the layer
-    assignment itself. A rank group that isn't the longest path to every one
-    of its nodes (e.g. `bus`, reached in one hop from `ch` just like `main`/
-    `mtx` are) can end up sharing a layer with a later rank group, and an
-    edge routed into it then has to cut across that later group's node
-    boxes to get there. A chain of invisible (`~~~`) edges through one dummy
-    "rank anchor" node per rank-group boundary (see `_RANK_ANCHOR_CLASS`)
-    fixes this without subgraphs: every node in rank N+1 gets an edge from
-    rank N's anchor and an edge to rank N+1's anchor, forcing its layer
-    strictly after every node in rank N regardless of what its real edges'
-    own topology would otherwise give it.
+    layer ELK's own layered algorithm assigns it -- it does not make ELK
+    respect `_RANK_GROUPS` as the layer assignment itself, and a rank group
+    that isn't the longest path to every one of its nodes (e.g. `bus`,
+    reached in one hop from `ch` just like `main`/`mtx` are) can in
+    principle end up sharing a layer with a later rank group. A dense
+    snapshot (many channels, many sends) was briefly seen cutting such an
+    edge straight across another rank's node boxes to get there, which a
+    forced per-rank-group ELK layer (one dummy "anchor" node per rank
+    boundary, chained to every real node with invisible edges) fixed --
+    but that scheme turned out to conflict with `mergeEdges` (see above),
+    and the wider spacing below turned out to give ELK enough room to
+    avoid the box-cutting layout on its own, so the anchor scheme was
+    removed rather than reconciled with it.
+
+    Known residual gap from removing it: a "backward" edge whose source is
+    legitimately deep in the signal-flow graph -- a sidechain "key" tap or a
+    bus/main/mtx monitor feed back into an earlier channel -- can still
+    drag that *target* node's ELK-assigned layer deep with it (e.g. a
+    channel gated by another channel's signal can land in the main/mtx
+    column instead of with the other channels), since nothing currently
+    excludes those edges from layer computation the way Graphviz's
+    `constraint="false"` does for `GraphvizRenderer`. This was already true
+    before the anchor scheme existed and before this renderer's
+    `mergeEdges` experiments, so it's a pre-existing gap, not a regression
+    -- flagged here rather than fixed because ELK's Mermaid integration
+    doesn't appear to expose a per-edge equivalent of `constraint="false"`.
 
     A node's label is rendered as HTML (Mermaid's `htmlLabels`, on by
     default) so detail lines can use a different style than the main
@@ -378,6 +389,7 @@ class MermaidRenderer(Renderer):
             "config:",
             "  layout: elk",
             "  elk:",
+            "    mergeEdges: true",
             #: `modelOrder` + `forceNodeModelOrder` keep nodes within a layer in
             #: the order we declare them (ascending by index, since
             #: `graph.nodes` already comes pre-sorted that way) instead of
@@ -424,45 +436,11 @@ class MermaidRenderer(Renderer):
         #: order nodes are *declared* in, which `forceNodeModelOrder` then
         #: preserves in the actual layout.
         class_members: dict[str, list[str]] = {}
-        rank_ids: list[list[str]] = []
         for kinds in _RANK_GROUPS:
-            ids: list[str] = []
             for node in (n for kind in kinds for n in nodes_by_kind.get(kind, [])):
                 mid = _mermaid_id(node.id)
                 lines.append(f'  {mid}["{_node_html_label(node)}"]')
                 class_members.setdefault(node.kind, []).append(mid)
-                ids.append(mid)
-            if ids:
-                rank_ids.append(ids)
-
-        #: ELK's layered algorithm assigns each node's *layer* itself (by
-        #: longest path from a source), ignoring `_RANK_GROUPS`/declaration
-        #: order entirely -- that only controls a node's position *within*
-        #: whatever layer ELK gave it (see `forceNodeModelOrder` above). A
-        #: rank group that isn't the longest path to every one of its nodes
-        #: (e.g. `bus`, reached in one hop from `ch` just like `main`/`mtx`
-        #: are) can end up sharing a layer with a later rank group, and an
-        #: edge into it then has to cut across that later group's node
-        #: boxes to get there. A chain of invisible (`~~~`) edges through
-        #: one dummy "anchor" node per rank boundary fixes this without
-        #: subgraphs (which broke `forceNodeModelOrder`'s within-layer
-        #: ordering, see above): every node in rank N+1 gets an edge from
-        #: rank N's anchor, and an edge to rank N+1's anchor, so its layer
-        #: is forced strictly after every node in rank N regardless of its
-        #: real edges' own topology.
-        anchor_ids = [f"rank_anchor_{i}" for i in range(len(rank_ids) - 1)]
-        for anchor_id in anchor_ids:
-            lines.append(f"  {anchor_id}[ ]")
-            class_members.setdefault(_RANK_ANCHOR_CLASS, []).append(anchor_id)
-        for rank_index, ids in enumerate(rank_ids):
-            if rank_index > 0:
-                for mid in ids:
-                    lines.append(f"  {anchor_ids[rank_index - 1]} ~~~ {mid}")
-            if rank_index < len(anchor_ids):
-                for mid in ids:
-                    lines.append(f"  {mid} ~~~ {anchor_ids[rank_index]}")
-        for prev_anchor, next_anchor in zip(anchor_ids, anchor_ids[1:]):
-            lines.append(f"  {prev_anchor} ~~~ {next_anchor}")
 
         #: The legend is the one deliberate exception to "nodes are declared
         #: flat" above: it has no edges into the signal-flow graph, so
@@ -512,7 +490,6 @@ class MermaidRenderer(Renderer):
                 lines.append(f"  {lid} --> {_mermaid_id(graph.edges[index].dest)}")
 
         lines.append(f"  classDef {_SHARED_LABEL_CLASS} fill:none,stroke:none;")
-        lines.append(f"  classDef {_RANK_ANCHOR_CLASS} fill:none,stroke:none;")
 
         for kind, members in class_members.items():
             lines.append(f"  class {','.join(members)} {kind};")

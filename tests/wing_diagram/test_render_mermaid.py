@@ -290,47 +290,6 @@ def test_render_does_not_wrap_flow_nodes_in_subgraphs() -> None:
     assert "subgraph legend" in content
 
 
-def test_render_pins_rank_order_with_invisible_anchor_edges() -> None:
-    """ELK's layered algorithm assigns each node's layer itself, by longest
-    path from a source -- it ignores declaration order entirely for *which*
-    layer a node lands in (only `forceNodeModelOrder` controls order
-    *within* a layer, see above). A `bus` node reached in one hop from `ch`,
-    just like a `main` node, can end up sharing a layer with `main` instead
-    of coming before it as `_RANK_GROUPS` intends -- and an edge routed
-    into it then cuts across `main`'s boxes to get there. A chain of
-    invisible (`~~~`) edges through one dummy anchor node per rank
-    boundary forces strict layer order instead, without subgraphs (which
-    break `forceNodeModelOrder`, see `test_render_does_not_wrap_flow_nodes_in_subgraphs`)."""
-    graph = RoutingGraph(
-        nodes=[
-            Node(id=("io_in", "LCL", 1), kind="io_in", label="Wren"),
-            Node(id=("ch", 1), kind="ch", label="Wren"),
-            Node(id=("bus", 1), kind="bus", label="Speach"),
-            Node(id=("main", 1), kind="main", label="Sanctuary Mix"),
-            Node(id=("io_out", "CRD", 1), kind="io_out", label="Exp Card 1"),
-        ],
-        edges=[
-            Edge(("io_in", "LCL", 1), ("ch", 1)),
-            Edge(("ch", 1), ("bus", 1)),
-            Edge(("ch", 1), ("main", 1)),
-            Edge(("main", 1), ("io_out", "CRD", 1)),
-        ],
-    )
-
-    content = MermaidRenderer()._build_mermaid(graph)
-
-    # One dummy anchor node per boundary between the 5 non-empty ranks here.
-    assert content.count("rank_anchor_") >= 4 * 2  # declared + referenced in edges
-    assert "classDef rankanchor fill:none,stroke:none;" in content
-    # Every node gets an invisible edge in from the previous rank's anchor
-    # and out to its own rank's anchor -- `bus` included, pinning it ahead
-    # of `main` even though both are one hop from `ch`.
-    assert "n_bus_1 ~~~ rank_anchor_" in content
-    assert "~~~ n_bus_1" in content
-    assert "n_main_1 ~~~ rank_anchor_" in content
-    assert "~~~ n_main_1" in content
-
-
 def test_render_sets_elk_model_order_options() -> None:
     content = MermaidRenderer()._build_mermaid(_sample_graph())
 
@@ -353,17 +312,20 @@ def test_render_widens_elk_edge_spacing() -> None:
     assert "layered.spacing.nodeNodeBetweenLayers: 80" in content
 
 
-def test_render_does_not_merge_unrelated_edges() -> None:
-    """`elk.mergeEdges` bundles any edges ELK routes through the same
-    inter-rank gap into a shared visual trunk, regardless of whether they
-    actually share an endpoint -- so a page of distinct one-to-one
-    connections (e.g. each physical input patched to its own, different
-    channel) was drawn as one undifferentiated trunk fanning out at both
-    ends, reading as a many-to-many relationship that doesn't exist. It
-    must stay off so every edge here gets its own traceable line."""
+def test_render_merges_edges_sharing_a_real_endpoint() -> None:
+    """`elk.mergeEdges` is on: edges that truly share a source or target
+    node (e.g. one channel's several sends to several mains/matrices)
+    should bundle into one visual trunk near that shared node instead of
+    running as fully independent parallel lines the whole way -- that's a
+    real shared relationship worth drawing as a fan, not visual noise.
+    (It once looked unsafe alongside a forced-rank-layer scheme that gave
+    every node in a rank a shared dummy "anchor" endpoint, bundling
+    unrelated one-to-one connections together -- see the git history on
+    `MermaidRenderer`'s docstring. That scheme is gone, so `mergeEdges`
+    now only ever bundles edges that share a real node.)"""
     content = MermaidRenderer()._build_mermaid(_sample_graph())
 
-    assert "mergeEdges" not in content
+    assert "mergeEdges: true" in content
 
 
 def test_render_includes_title_in_frontmatter_when_given() -> None:
