@@ -381,6 +381,19 @@ class MermaidRenderer(Renderer):
             "    preset: modelOrder",
             "    forceNodeModelOrder: true",
             "    considerModelOrder: NODES_AND_EDGES",
+            #: ELK's default spacing packs parallel edges passing through the
+            #: same inter-rank gap close enough to visually fuse into what
+            #: looks like one or two thick lines whenever several nodes
+            #: share a dense fan-out/fan-in (e.g. several channels each
+            #: sending to the same several mains/matrices) -- not a
+            #: crossing, just indistinguishable parallel segments. Wider
+            #: edge-edge and node-node spacing gives each parallel segment
+            #: and each bend point visibly distinct room.
+            "    spacing.edgeEdge: 25",
+            "    layered.spacing.edgeEdgeBetweenLayers: 25",
+            "    layered.spacing.edgeNodeBetweenLayers: 25",
+            "    layered.spacing.nodeNodeBetweenLayers: 80",
+            "    spacing.nodeNode: 40",
             "---",
             "flowchart LR",
         ]

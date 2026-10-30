@@ -338,6 +338,21 @@ def test_render_sets_elk_model_order_options() -> None:
     assert "preset: modelOrder" in content
 
 
+def test_render_widens_elk_edge_spacing() -> None:
+    """ELK's default spacing packs parallel edges passing through the same
+    inter-rank gap closely enough to visually fuse into what looks like one
+    or two thick lines whenever several nodes share a dense fan-out/fan-in
+    (e.g. several channels each sending to the same several mains/
+    matrices) -- not a crossing, just indistinguishable parallel segments.
+    Wider spacing gives each parallel segment and bend point visibly
+    distinct room."""
+    content = MermaidRenderer()._build_mermaid(_sample_graph())
+
+    assert "spacing.edgeEdge: 25" in content
+    assert "layered.spacing.edgeEdgeBetweenLayers: 25" in content
+    assert "layered.spacing.nodeNodeBetweenLayers: 80" in content
+
+
 def test_render_includes_title_in_frontmatter_when_given() -> None:
     content = MermaidRenderer()._build_mermaid(_sample_graph(), title="Announcements")
 
