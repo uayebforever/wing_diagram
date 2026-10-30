@@ -374,6 +374,8 @@ class MermaidRenderer(Renderer):
         for node in graph.nodes:
             nodes_by_kind.setdefault(node.kind, []).append(node)
 
+        _reorder_io_in_by_target(nodes_by_kind, graph.edges)
+
         #: Nodes are declared flat (not wrapped in a Mermaid `subgraph` per
         #: rank group) -- ELK treats a `subgraph` as its own nested layout
         #: problem, which was overriding `forceNodeModelOrder` and reordering
@@ -446,6 +448,51 @@ class MermaidRenderer(Renderer):
             )
 
         return "\n".join(lines) + "\n"
+
+
+def _reorder_io_in_by_target(nodes_by_kind: dict[str, list[Node]], edges: list[Edge]) -> None:
+    """Reorders `nodes_by_kind["io_in"]` in place to track the declared
+    order of the ch/aux node each physical input is patched to, instead of
+    raw hardware id order.
+
+    `MermaidRenderer` forces node order (`forceNodeModelOrder`) and so
+    disables ELK's own crossing minimization -- see its docstring. ch/aux/
+    bus/main/mtx/io_out keep their natural index order, since that's what a
+    user expects of a channel list; but a physical input's hardware id has
+    no relation to which channel it's patched to, so hardware-id order can
+    put e.g. an AES50 input patched to a channel near the bottom of the
+    list first, producing one edge that cuts across every other
+    input-to-channel edge. Ordering inputs by their target channel's
+    position instead keeps same-direction input/channel edges roughly
+    parallel, with only genuine reorderings left to cross.
+
+    An input with no direct ch/aux edge (e.g. a hardware passthrough
+    straight to an output) keeps its relative hardware-id position,
+    trailing the ones that do have a channel target.
+    """
+    io_in = nodes_by_kind.get("io_in")
+    if not io_in:
+        return
+
+    target_position = {
+        node.id: position
+        for position, node in enumerate(n for kind in ("ch", "aux") for n in nodes_by_kind.get(kind, []))
+    }
+    io_in_ids = {node.id for node in io_in}
+    first_target: dict[NodeId, NodeId] = {}
+    for edge in edges:
+        if edge.source in io_in_ids and edge.dest in target_position:
+            first_target.setdefault(edge.source, edge.dest)
+
+    original_position = {node.id: position for position, node in enumerate(io_in)}
+    unanchored = len(target_position)
+
+    def sort_key(node: Node) -> tuple[int, int]:
+        target = first_target.get(node.id)
+        anchor = target_position[target] if target is not None else unanchored
+        return (anchor, original_position[node.id])
+
+    io_in.sort(key=sort_key)
 
 
 def _node_html_label(node: Node) -> str:

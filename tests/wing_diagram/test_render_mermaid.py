@@ -222,6 +222,62 @@ def test_render_declares_nodes_in_the_graphs_given_order() -> None:
     assert content.index("n_io_in_LCL_1[") < content.index("n_io_in_LCL_9[")
 
 
+def test_render_orders_physical_inputs_by_their_channel_assignment() -> None:
+    """With `forceNodeModelOrder` on, ELK never reorders nodes to cut down
+    on crossings -- so a physical input declared in raw hardware-id order
+    regardless of which channel it feeds (e.g. an AES50 input patched to a
+    channel near the bottom of the channel list, declared ahead of local
+    inputs patched to channels near the top) draws one edge that cuts
+    across every other input-to-channel edge. `_build_mermaid` instead
+    declares inputs in the order of the channel each is patched to."""
+    graph = RoutingGraph(
+        nodes=[
+            Node(id=("io_in", "A", 1), kind="io_in", label="Matched Pair"),
+            Node(id=("io_in", "LCL", 1), kind="io_in", label="Wren"),
+            Node(id=("io_in", "LCL", 2), kind="io_in", label="Wendy"),
+            Node(id=("ch", 1), kind="ch", label="Wren"),
+            Node(id=("ch", 2), kind="ch", label="Wendy"),
+            Node(id=("ch", 10), kind="ch", label="Choir"),
+        ],
+        edges=[
+            Edge(("io_in", "A", 1), ("ch", 10)),
+            Edge(("io_in", "LCL", 1), ("ch", 1)),
+            Edge(("io_in", "LCL", 2), ("ch", 2)),
+        ],
+    )
+
+    content = MermaidRenderer()._build_mermaid(graph)
+
+    assert (
+        content.index("n_io_in_LCL_1[")
+        < content.index("n_io_in_LCL_2[")
+        < content.index("n_io_in_A_1[")
+    )
+
+
+def test_render_keeps_hardware_order_for_inputs_without_a_channel_target() -> None:
+    """A physical input with no direct ch/aux edge (e.g. a hardware
+    passthrough straight to an output) has no channel position to sort by,
+    so it keeps its relative hardware-id order, trailing inputs that do
+    have a channel target."""
+    graph = RoutingGraph(
+        nodes=[
+            Node(id=("io_in", "LCL", 1), kind="io_in", label="Direct"),
+            Node(id=("io_in", "LCL", 2), kind="io_in", label="Wendy"),
+            Node(id=("ch", 2), kind="ch", label="Wendy"),
+            Node(id=("io_out", "CRD", 1), kind="io_out", label="Exp Card 1"),
+        ],
+        edges=[
+            Edge(("io_in", "LCL", 1), ("io_out", "CRD", 1)),
+            Edge(("io_in", "LCL", 2), ("ch", 2)),
+        ],
+    )
+
+    content = MermaidRenderer()._build_mermaid(graph)
+
+    assert content.index("n_io_in_LCL_2[") < content.index("n_io_in_LCL_1[")
+
+
 def test_render_does_not_wrap_flow_nodes_in_subgraphs() -> None:
     """A Mermaid `subgraph` is its own nested ELK layout problem and was
     observed to silently stop `forceNodeModelOrder` from applying to the
