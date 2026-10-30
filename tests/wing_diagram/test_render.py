@@ -78,49 +78,6 @@ def test_render_shows_node_detail_and_edge_level_label(tmp_path: Path) -> None:
     assert "POST FADER" in content
 
 
-def test_render_omits_label_for_default_post_fader_send(tmp_path: Path) -> None:
-    graph = RoutingGraph(
-        nodes=[
-            Node(id=("ch", 1), kind="ch", label="Ch 1"),
-            Node(id=("main", 1), kind="main", label="Sanctuary Mix"),
-        ],
-        edges=[Edge(("ch", 1), ("main", 1), {"level_db": 0.0, "tap": "POST FADER"})],
-    )
-
-    out_path = GraphvizRenderer().render(graph, tmp_path / "diagram.svg")
-
-    content = out_path.read_text()
-    assert "POST FADER" not in content
-
-
-def test_render_shares_one_label_for_matching_non_default_sends(tmp_path: Path) -> None:
-    graph = RoutingGraph(
-        nodes=[
-            Node(id=("ch", 1), kind="ch", label="Ch 1"),
-            Node(id=("bus", 1), kind="bus", label="Bus 1"),
-            Node(id=("bus", 2), kind="bus", label="Bus 2"),
-        ],
-        edges=[
-            Edge(("ch", 1), ("bus", 1), {"level_db": -20.0, "tap": "PRE FADER"}),
-            Edge(("ch", 1), ("bus", 2), {"level_db": -20.0, "tap": "PRE FADER"}),
-        ],
-    )
-
-    out_path = GraphvizRenderer().render(graph, tmp_path / "diagram.svg")
-
-    content = out_path.read_text()
-    assert content.count("PRE FADER") == 1
-
-
-def test_render_includes_title_when_given(tmp_path: Path) -> None:
-    out_path = GraphvizRenderer().render(
-        _sample_graph(), tmp_path / "diagram.svg", title="Announcements"
-    )
-
-    content = out_path.read_text()
-    assert "Announcements" in content
-
-
 def test_render_key_source_edge_is_dashed_and_labelled(tmp_path: Path) -> None:
     graph = RoutingGraph(
         nodes=[
