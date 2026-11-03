@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import html
+import shutil
+import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -481,3 +484,149 @@ def _wrap_html(mermaid_source: str, title: str | None = None) -> str:
 </body>
 </html>
 """
+
+
+class D2Renderer(Renderer):
+    """Renders a `RoutingGraph` using D2 (https://d2lang.com) with its `elk`
+    layout engine.
+
+    D2 was added after `MermaidRenderer`'s `elk.mergeEdges` turned out to
+    bundle together edges that merely passed through the same routing
+    corridor rather than edges that actually shared an endpoint (see
+    `MermaidRenderer`'s docstring) -- a problem `MermaidRenderer` works
+    around with explicit junction-dot nodes. Measuring the rendered SVG
+    geometry of a real, densely-connected snapshot (most channels feeding
+    both a bus and the mains) found D2+elk's *default* routing left only one
+    pair of unrelated edges running briefly parallel (out of 72 edges, 78px
+    of incidental closeness, never literally coincident), against 188 such
+    pairs (up to 464px) for Mermaid's `mergeEdges`, and a dozen-ish smaller
+    incidents for Graphviz with or without `concentrate`. D2+elk needed none
+    of Mermaid's junction-dot workaround to get there -- it just doesn't
+    share routing lanes between unrelated edges by default.
+
+    D2 ships as a single self-contained binary (no Node/browser dependency,
+    unlike `MermaidRenderer`'s `.html` preview) and renders straight to
+    `.svg`/`.png`/`.pdf`/... itself, the same shape as `GraphvizRenderer`
+    shelling out to `dot`.
+
+    The layout engine is selected from inside the generated `.d2` source
+    (`vars.d2-config.layout-engine`) rather than a CLI flag, so the source
+    file is self-contained the same way `MermaidRenderer`'s frontmatter is.
+
+    Node/edge styling intentionally matches `GraphvizRenderer`'s fidelity
+    rather than `MermaidRenderer`'s richer HTML labels (no small-grey-vs-
+    italic split between config and dynamics detail lines) -- D2 plain
+    labels don't support mixed inline styles, and a markdown label block
+    would cost the plain rectangle shape (see `_d2_label` below).
+    """
+
+    def __init__(self, d2_path: str = "d2") -> None:
+        """`d2_path` is the `d2` executable to run (default: look up `d2` on
+        `PATH`)."""
+        self._d2_path = d2_path
+
+    def render(self, graph: RoutingGraph, out_path: Path, title: str | None = None) -> Path:
+        out_path = Path(out_path)
+        if shutil.which(self._d2_path) is None:
+            raise UserError(
+                f"D2Renderer needs the {self._d2_path!r} executable on PATH -- install it "
+                "from https://d2lang.com/tour/install (`go install oss.terrastruct.com/d2@latest` "
+                "also works if you have a Go toolchain)."
+            )
+        source = self._build_d2(graph, title)
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".d2", dir=str(out_path.parent) or ".", delete=False
+        ) as f:
+            f.write(source)
+            d2_path = Path(f.name)
+        try:
+            result = subprocess.run(
+                [self._d2_path, str(d2_path), str(out_path)],
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            d2_path.unlink(missing_ok=True)
+        if result.returncode != 0:
+            raise UserError(f"d2 failed to render the diagram:\n{result.stderr}")
+        return out_path
+
+    def _build_d2(self, graph: RoutingGraph, title: str | None = None) -> str:
+        lines: list[str] = [
+            "vars: {",
+            "  d2-config: {",
+            "    layout-engine: elk",
+            "  }",
+            "}",
+            "direction: right",
+            "",
+        ]
+        if title:
+            lines += [
+                "title: {",
+                f"  label: {_d2_quoted(title)}",
+                "  near: top-center",
+                "  shape: text",
+                "  style.font-size: 28",
+                "  style.bold: true",
+                "}",
+                "",
+            ]
+        elif not graph.nodes:
+            #: d2 silently writes nothing at all for a diagram with zero
+            #: shapes (no error, just no output file) -- an untitled empty
+            #: `RoutingGraph` would otherwise hit that with no node or title
+            #: to act as a shape, so give it an invisible placeholder.
+            lines += ['_empty_: "" { style.opacity: 0 }', ""]
+
+        for node in graph.nodes:
+            nid = _d2_id(node.id)
+            fill = _NODE_COLORS.get(node.kind, "#ffffff")
+            stroke = _NODE_STROKE_COLORS.get(node.kind, "#333333")
+            lines.append(f"{nid}: {{")
+            lines.append(f"  label: {_d2_label([_node_title(node), *node.detail])}")
+            lines.append(f'  style.fill: "{fill}"')
+            lines.append(f'  style.stroke: "{stroke}"')
+            lines.append("}")
+
+        for edge in graph.edges:
+            src = _d2_id(edge.source)
+            dst = _d2_id(edge.dest)
+            if edge.meta.get("kind") == "key":
+                label = f"KEY ({edge.meta['proc']})" if edge.meta.get("proc") else "KEY"
+                lines.append(f"{src} -> {dst}: {_d2_quoted(label)} {{")
+                lines.append(f'  style.stroke: "{_KEY_EDGE_COLOR}"')
+                lines.append(f'  style.font-color: "{_KEY_EDGE_COLOR}"')
+                lines.append("  style.stroke-dash: 4")
+                lines.append("}")
+                continue
+            parts = _edge_label_parts(edge)
+            if parts:
+                lines.append(f"{src} -> {dst}: {_d2_label(parts)}")
+            else:
+                lines.append(f"{src} -> {dst}")
+
+        return "\n".join(lines) + "\n"
+
+
+def _d2_id(node_id: NodeId) -> str:
+    return "n_" + "_".join(str(part) for part in node_id)
+
+
+def _d2_quoted(text: str) -> str:
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _d2_label(lines_list: list[str]) -> str:
+    """A D2 quoted-string label, `\\n`-joined when there's more than one
+    line. Unlike `MermaidRenderer`'s HTML labels, this stays a plain
+    rectangle -- D2's multi-line block-string syntax (`|...|`) renders as a
+    markdown/text shape instead, dropping the fill/stroke box entirely.
+
+    Each line is escaped on its own and *then* joined with a literal
+    `\\n` -- escaping the whole joined string first would double-escape
+    that separator's own backslash into a literal `\\n` in the output
+    rather than a line break."""
+    escaped = (line.replace("\\", "\\\\").replace('"', '\\"') for line in lines_list)
+    return '"' + "\\n".join(escaped) + '"'
