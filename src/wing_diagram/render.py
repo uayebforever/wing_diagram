@@ -469,11 +469,15 @@ class D2Renderer(Renderer):
     (`vars.d2-config.layout-engine`) rather than a CLI flag, so the source
     file is self-contained the same way `MermaidRenderer`'s frontmatter is.
 
-    Node/edge styling intentionally matches `GraphvizRenderer`'s fidelity
-    rather than `MermaidRenderer`'s richer HTML labels (no small-grey-vs-
-    italic split between config and dynamics detail lines) -- D2 plain
-    labels don't support mixed inline styles, and a markdown label block
-    would cost the plain rectangle shape (see `_d2_label` below).
+    A node's label is a Markdown block inside an explicitly-declared
+    `shape: rectangle` (D2 keeps the fill/stroke box in that case), so it
+    can mix styles the way `MermaidRenderer`'s HTML labels do: a bold title,
+    plain config detail (preamp gain, trim) as its own paragraph, and
+    dynamics badges (Gate/Comp) in italics as a separate paragraph. Markdown
+    has no per-span colour or size, so unlike Mermaid the config detail
+    isn't small grey type, and there is no divider rule (an `<hr>` in a D2
+    Markdown block is untested). Edge labels stay plain strings, see
+    `_d2_label`.
     """
 
     def __init__(self, d2_path: str = "d2") -> None:
@@ -540,7 +544,11 @@ class D2Renderer(Renderer):
             fill = _NODE_COLORS.get(node.kind, "#ffffff")
             stroke = _NODE_STROKE_COLORS.get(node.kind, "#333333")
             lines.append(f"{nid}: {{")
-            lines.append(f"  label: {_d2_label([_node_title(node), *node.detail])}")
+            lines.extend(f"  {line}" for line in _d2_node_label_block(node))
+            #: Required: D2 only keeps a box around a Markdown label if the
+            #: shape is declared explicitly (even though rectangle is the
+            #: default).
+            lines.append("  shape: rectangle")
             lines.append(f'  style.fill: "{fill}"')
             lines.append(f'  style.stroke: "{stroke}"')
             lines.append("}")
@@ -586,3 +594,37 @@ def _d2_label(lines_list: list[str]) -> str:
     rather than a line break."""
     escaped = (line.replace("\\", "\\\\").replace('"', '\\"') for line in lines_list)
     return '"' + "\\n".join(escaped) + '"'
+
+
+#: Characters that are Markdown syntax in a D2 `|md` block and so are
+#: backslash-escaped in label text.
+_MD_SPECIAL = "\\`*_[]<>#|~"
+
+
+def _md_escape(text: str) -> str:
+    return "".join(f"\\{c}" if c in _MD_SPECIAL else c for c in text)
+
+
+def _d2_node_label_block(node: Node) -> list[str]:
+    """The `label: |||md ... |||` block for a node, as unindented lines:
+    a bold title, then any config detail lines (one paragraph), then any
+    dynamics badges (`GATE`/`COMP`, one italic paragraph) -- the Markdown
+    counterpart of `_node_html_label`.
+
+    Uses `|||` delimiters (rather than `|`) so a label containing `|` can't
+    end the block early, and separates lines with blank lines (paragraphs)
+    rather than relying on Markdown hard-break syntax."""
+    config_lines = [d for d in node.detail if not d.startswith(_DYNAMICS_DETAIL_PREFIXES)]
+    dynamics_lines = [d for d in node.detail if d.startswith(_DYNAMICS_DETAIL_PREFIXES)]
+
+    paragraphs = [f"**{_md_escape(_node_title(node))}**"]
+    paragraphs += [_md_escape(d) for d in config_lines]
+    paragraphs += [f"*{_md_escape(d)}*" for d in dynamics_lines]
+
+    lines = ["label: |||md"]
+    for i, paragraph in enumerate(paragraphs):
+        if i:
+            lines.append("")
+        lines.append(f"  {paragraph}")
+    lines.append("|||")
+    return lines

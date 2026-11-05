@@ -140,3 +140,39 @@ def test_build_d2_omits_edge_label_for_standard_unity_post_fader_send() -> None:
 
     assert "n_ch_1 -> n_bus_1\n" in content
     assert "POST FADER" not in content
+
+
+def test_build_d2_node_label_is_markdown_in_an_explicit_rectangle() -> None:
+    graph = RoutingGraph(
+        nodes=[
+            Node(
+                id=("ch", 1),
+                kind="ch",
+                label="Wren",
+                detail=("preamp +32.5 dB", "COMP · WING COMPRESSOR · thr -20 dB"),
+            ),
+        ],
+        edges=[],
+    )
+
+    content = D2Renderer()._build_d2(graph)
+
+    assert "label: |||md" in content
+    assert "**Ch 1: Wren**" in content
+    assert "preamp +32.5 dB" in content
+    # Dynamics badges are italic; plain config detail is not.
+    assert "*COMP · WING COMPRESSOR · thr -20 dB*" in content
+    assert "*preamp" not in content
+    # Without an explicit shape D2 would drop the box around a Markdown label.
+    assert "shape: rectangle" in content
+
+
+def test_build_d2_escapes_markdown_syntax_in_node_labels() -> None:
+    graph = RoutingGraph(
+        nodes=[Node(id=("ch", 1), kind="ch", label="Kick | Snare_*1*", detail=())],
+        edges=[],
+    )
+
+    content = D2Renderer()._build_d2(graph)
+
+    assert "Kick \\| Snare\\_\\*1\\*" in content
