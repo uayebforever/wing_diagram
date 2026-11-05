@@ -221,16 +221,15 @@ class MermaidRenderer(Renderer):
     made unrelated channels look wired to busses they never send to (see
     the "overlapping connection lines" writeup).
 
-    Real shared-endpoint bundling is instead modelled explicitly: a node
-    with more than one same-kind (non-`key`) edge on its output side gets
-    a small junction-dot node (`jout_<node>`) that all those edges route
-    through before diverging to their real destinations, and likewise a
-    `jin_<node>` dot on the input side for a node fed by more than one
-    edge (`_build_mermaid`'s `fan_out`/`fan_in` pass). Because the dot is a
-    real node in the graph ELK lays out, edges only ever appear to share a
-    path where they *actually* share that endpoint -- unlike `mergeEdges`,
-    which could make that appearance by coincidence. A node with only one
-    edge on a side gets no dot; there's nothing there to disambiguate.
+    An earlier version of this renderer worked around that by routing
+    same-source/same-destination edges through an explicit junction-dot
+    node, so a real ELK node (not a heuristic) marked where edges actually
+    shared an endpoint. That's gone for now -- see `D2Renderer`, which gets
+    materially better edge separation than Mermaid+elk ever did, with
+    neither `mergeEdges` nor junction dots, for anything that needs more
+    than "just don't draw false merges." This renderer is kept simple
+    (`mergeEdges` off, nothing else) until/unless Mermaid is worth that
+    complexity again.
 
     Node kinds keep the same fill/stroke colors as `GraphvizRenderer` (via
     `classDef`/`class`), and nodes are declared in the same left-to-right
@@ -325,51 +324,14 @@ class MermaidRenderer(Renderer):
                 lines.append(f'  {mid}["{_node_html_label(node)}"]')
                 class_members.setdefault(node.kind, []).append(mid)
 
-        #: Non-key edges that share a source, or share a destination, really
-        #: do share that one attachment point -- so route them through a
-        #: small junction dot at that shared node instead of each claiming
-        #: its own point on the node's border. A node with only one edge on
-        #: a side gets no junction; there's nothing to bundle. See
-        #: `MermaidRenderer`'s docstring for why this replaces `mergeEdges`.
-        fan_out: dict[NodeId, list[int]] = {}
-        fan_in: dict[NodeId, list[int]] = {}
-        for edge_index, edge in enumerate(graph.edges):
-            if edge.meta.get("kind") == "key":
-                continue
-            fan_out.setdefault(edge.source, []).append(edge_index)
-            fan_in.setdefault(edge.dest, []).append(edge_index)
-
-        out_junction = {
-            node_id: f"jout_{_mermaid_id(node_id)}"
-            for node_id, indices in fan_out.items()
-            if len(indices) > 1
-        }
-        in_junction = {
-            node_id: f"jin_{_mermaid_id(node_id)}"
-            for node_id, indices in fan_in.items()
-            if len(indices) > 1
-        }
-
-        for jid in sorted(set(out_junction.values()) | set(in_junction.values())):
-            lines.append(f'  {jid}((" ")):::junction')
-
-        link_index = 0
         key_edge_indices: list[int] = []
-        for node_id, jid in out_junction.items():
-            lines.append(f"  {_mermaid_id(node_id)} --- {jid}")
-            link_index += 1
-        for node_id, jid in in_junction.items():
-            lines.append(f"  {jid} --> {_mermaid_id(node_id)}")
-            link_index += 1
-
-        for edge in graph.edges:
-            src = out_junction.get(edge.source, _mermaid_id(edge.source))
-            dst = in_junction.get(edge.dest, _mermaid_id(edge.dest))
+        for edge_index, edge in enumerate(graph.edges):
+            src = _mermaid_id(edge.source)
+            dst = _mermaid_id(edge.dest)
             if edge.meta.get("kind") == "key":
                 label = f"KEY ({edge.meta['proc']})" if edge.meta.get("proc") else "KEY"
                 lines.append(f'  {src} -.->|"{_small_html(label)}"| {dst}')
-                key_edge_indices.append(link_index)
-                link_index += 1
+                key_edge_indices.append(edge_index)
                 continue
             parts = _edge_label_parts(edge)
             if parts:
@@ -377,15 +339,9 @@ class MermaidRenderer(Renderer):
                 lines.append(f'  {src} -->|"{label_html}"| {dst}')
             else:
                 lines.append(f"  {src} --> {dst}")
-            link_index += 1
 
         for kind, members in class_members.items():
             lines.append(f"  class {','.join(members)} {kind};")
-
-        lines.append(
-            "  classDef junction fill:#555,stroke:#555,color:#555,"
-            "width:6px,height:6px;"
-        )
 
         for idx in key_edge_indices:
             lines.append(
