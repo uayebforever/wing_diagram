@@ -176,3 +176,10 @@ def test_build_d2_escapes_markdown_syntax_in_node_labels() -> None:
     content = D2Renderer()._build_d2(graph)
 
     assert "Kick \\| Snare\\_\\*1\\*" in content
+
+
+def test_build_d2_layout_engine_is_selectable() -> None:
+    content = D2Renderer(layout_engine="tala")._build_d2(_sample_graph())
+
+    assert "layout-engine: tala" in content
+    assert "layout-engine: elk" not in content

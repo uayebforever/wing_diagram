@@ -480,10 +480,12 @@ class D2Renderer(Renderer):
     `_d2_label`.
     """
 
-    def __init__(self, d2_path: str = "d2") -> None:
+    def __init__(self, d2_path: str = "d2", layout_engine: str = "elk") -> None:
         """`d2_path` is the `d2` executable to run (default: look up `d2` on
-        `PATH`)."""
+        `PATH`). `layout_engine` is any engine the installed `d2` ships --
+        `"elk"` (default), `"dagre"`, or `"tala"` (bundled since d2 v0.9.0)."""
         self._d2_path = d2_path
+        self._layout_engine = layout_engine
 
     def render(self, graph: RoutingGraph, out_path: Path, title: str | None = None) -> Path:
         out_path = Path(out_path)
@@ -515,7 +517,7 @@ class D2Renderer(Renderer):
         lines: list[str] = [
             "vars: {",
             "  d2-config: {",
-            "    layout-engine: elk",
+            f"    layout-engine: {self._layout_engine}",
             "  }",
             "}",
             "direction: right",
