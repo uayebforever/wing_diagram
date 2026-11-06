@@ -299,6 +299,10 @@ class MermaidRenderer(Renderer):
             #: Left off -- see `MermaidRenderer`'s docstring for why
             #: `mergeEdges` is unsafe for this graph's density.
             "    mergeEdges: false",
+            #: Mermaid (>= 12) draws little arc "hops" where edges cross without
+            #: connecting, on by default; `false` gives plain straight crossings
+            #: (and keeps the rounded corners on every edge).
+            "    lineHops: false",
             "---",
             "flowchart LR",
         ]
