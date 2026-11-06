@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import html
+import shutil
+import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -208,29 +211,38 @@ class MermaidRenderer(Renderer):
     """Renders a `RoutingGraph` as a Mermaid flowchart.
 
     Uses Mermaid's `elk` layout engine for orthogonal edge routing with
-    rounded corners (straight segments, not Graphviz's curved splines),
-    and `elk.mergeEdges` so that edges sharing a source or destination
-    bundle into a shared trunk instead of criss-crossing independently --
-    the closest built-in approximation of "edges should only overlap when
-    they share an end".
+    rounded corners (straight segments, not Graphviz's curved splines).
+
+    `elk.mergeEdges` is deliberately left off. It sounds like exactly what
+    we want -- edges sharing a source or destination bundling into a shared
+    trunk -- but what it actually does is bundle together *any* edges that
+    happen to travel through the same inter-layer routing channel, even
+    when they share neither endpoint, which in this densely-connected graph
+    made unrelated channels look wired to busses they never send to (see
+    the "overlapping connection lines" writeup).
+
+    An earlier version of this renderer worked around that by routing
+    same-source/same-destination edges through an explicit junction-dot
+    node, so a real ELK node (not a heuristic) marked where edges actually
+    shared an endpoint. That's gone for now -- see `D2Renderer`, which gets
+    materially better edge separation than Mermaid+elk ever did, with
+    neither `mergeEdges` nor junction dots, for anything that needs more
+    than "just don't draw false merges." This renderer is kept simple
+    (`mergeEdges` off, nothing else) until/unless Mermaid is worth that
+    complexity again.
 
     Node kinds keep the same fill/stroke colors as `GraphvizRenderer` (via
     `classDef`/`class`), and nodes are declared in the same left-to-right
-    `_RANK_GROUPS` order to keep the signal-flow layout -- as a declaration
-    order rather than a Mermaid `subgraph`, since ELK treats a `subgraph` as
-    its own nested layout problem and silently stops respecting node order
-    inside it (see `elk.forceNodeModelOrder` below).
+    `_RANK_GROUPS` order -- as a declaration order rather than a Mermaid
+    `subgraph`, since ELK treats a `subgraph` as its own nested layout
+    problem and silently stops respecting node order inside it.
 
-    `elk.forceNodeModelOrder` (+ the `modelOrder` preset) keeps nodes within
-    a layer in declaration order -- i.e. ascending by index, since
-    `graph.nodes` already comes pre-sorted that way -- rather than ELK's
-    default crossing-minimization reordering them freely. This also happens
-    to be what keeps a signal-in edge and a signal-out edge from ever
-    landing on the same side of a node: ELK's free reordering was what let
-    e.g. a monitor-feed edge (bus/main/mtx back into a channel) and a
-    sidechain "key" edge end up sharing a node's east side, making the two
-    arrowheads ambiguous; with model order enforced, a same-layer edge like
-    a key tap instead routes via the node's north/south side.
+    ELK's own crossing-minimization is left free to reorder nodes within a
+    layer (no `elk.forceNodeModelOrder`), which gives the independent edges
+    above more room to separate instead of being pinned into a corridor
+    that forces them to run parallel. It groups nodes by shared destination
+    instead of raw index, which reads a little less like a numeric channel
+    list but keeps crossings down.
 
     A node's label is rendered as HTML (Mermaid's `htmlLabels`, on by
     default) so detail lines can use a different style than the main
@@ -284,18 +296,9 @@ class MermaidRenderer(Renderer):
         lines += [
             "  layout: elk",
             "  elk:",
-            "    mergeEdges: true",
-            #: `modelOrder` + `forceNodeModelOrder` keep nodes within a layer in
-            #: the order we declare them (ascending by index, since
-            #: `graph.nodes` already comes pre-sorted that way) instead of
-            #: ELK's default crossing-minimization freely reordering them.
-            #: Also incidentally what gets the sidechain/monitor-feed "key"
-            #: edges routed via a node's north/south side rather than sharing
-            #: an east/west port with its main signal edges -- see the
-            #: "never share an attachment point" note on `MermaidRenderer`.
-            "    preset: modelOrder",
-            "    forceNodeModelOrder: true",
-            "    considerModelOrder: NODES_AND_EDGES",
+            #: Left off -- see `MermaidRenderer`'s docstring for why
+            #: `mergeEdges` is unsafe for this graph's density.
+            "    mergeEdges: false",
             "---",
             "flowchart LR",
         ]
@@ -310,10 +313,10 @@ class MermaidRenderer(Renderer):
 
         #: Nodes are declared flat (not wrapped in a Mermaid `subgraph` per
         #: rank group) -- ELK treats a `subgraph` as its own nested layout
-        #: problem, which was overriding `forceNodeModelOrder` and reordering
-        #: nodes within it regardless. `_RANK_GROUPS` still controls the
-        #: order nodes are *declared* in, which `forceNodeModelOrder` then
-        #: preserves in the actual layout.
+        #: problem, which stops `_RANK_GROUPS` from influencing layer order
+        #: across group boundaries. `_RANK_GROUPS` still controls the order
+        #: nodes are *declared* in, which ELK's crossing-minimization takes
+        #: as its starting point (see `MermaidRenderer`'s docstring).
         class_members: dict[str, list[str]] = {}
         for kinds in _RANK_GROUPS:
             for node in (n for kind in kinds for n in nodes_by_kind.get(kind, [])):
@@ -437,3 +440,149 @@ def _wrap_html(mermaid_source: str, title: str | None = None) -> str:
 </body>
 </html>
 """
+
+
+class D2Renderer(Renderer):
+    """Renders a `RoutingGraph` using D2 (https://d2lang.com) with its `elk`
+    layout engine.
+
+    D2 was added after `MermaidRenderer`'s `elk.mergeEdges` turned out to
+    bundle together edges that merely passed through the same routing
+    corridor rather than edges that actually shared an endpoint (see
+    `MermaidRenderer`'s docstring) -- a problem `MermaidRenderer` works
+    around with explicit junction-dot nodes. Measuring the rendered SVG
+    geometry of a real, densely-connected snapshot (most channels feeding
+    both a bus and the mains) found D2+elk's *default* routing left only one
+    pair of unrelated edges running briefly parallel (out of 72 edges, 78px
+    of incidental closeness, never literally coincident), against 188 such
+    pairs (up to 464px) for Mermaid's `mergeEdges`, and a dozen-ish smaller
+    incidents for Graphviz with or without `concentrate`. D2+elk needed none
+    of Mermaid's junction-dot workaround to get there -- it just doesn't
+    share routing lanes between unrelated edges by default.
+
+    D2 ships as a single self-contained binary (no Node/browser dependency,
+    unlike `MermaidRenderer`'s `.html` preview) and renders straight to
+    `.svg`/`.png`/`.pdf`/... itself, the same shape as `GraphvizRenderer`
+    shelling out to `dot`.
+
+    The layout engine is selected from inside the generated `.d2` source
+    (`vars.d2-config.layout-engine`) rather than a CLI flag, so the source
+    file is self-contained the same way `MermaidRenderer`'s frontmatter is.
+
+    Node/edge styling intentionally matches `GraphvizRenderer`'s fidelity
+    rather than `MermaidRenderer`'s richer HTML labels (no small-grey-vs-
+    italic split between config and dynamics detail lines) -- D2 plain
+    labels don't support mixed inline styles, and a markdown label block
+    would cost the plain rectangle shape (see `_d2_label` below).
+    """
+
+    def __init__(self, d2_path: str = "d2") -> None:
+        """`d2_path` is the `d2` executable to run (default: look up `d2` on
+        `PATH`)."""
+        self._d2_path = d2_path
+
+    def render(self, graph: RoutingGraph, out_path: Path, title: str | None = None) -> Path:
+        out_path = Path(out_path)
+        if shutil.which(self._d2_path) is None:
+            raise UserError(
+                f"D2Renderer needs the {self._d2_path!r} executable on PATH -- install it "
+                "from https://d2lang.com/tour/install (`go install oss.terrastruct.com/d2@latest` "
+                "also works if you have a Go toolchain)."
+            )
+        source = self._build_d2(graph, title)
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".d2", dir=str(out_path.parent) or ".", delete=False
+        ) as f:
+            f.write(source)
+            d2_path = Path(f.name)
+        try:
+            result = subprocess.run(
+                [self._d2_path, str(d2_path), str(out_path)],
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            d2_path.unlink(missing_ok=True)
+        if result.returncode != 0:
+            raise UserError(f"d2 failed to render the diagram:\n{result.stderr}")
+        return out_path
+
+    def _build_d2(self, graph: RoutingGraph, title: str | None = None) -> str:
+        lines: list[str] = [
+            "vars: {",
+            "  d2-config: {",
+            "    layout-engine: elk",
+            "  }",
+            "}",
+            "direction: right",
+            "",
+        ]
+        if title:
+            lines += [
+                "title: {",
+                f"  label: {_d2_quoted(title)}",
+                "  near: top-center",
+                "  shape: text",
+                "  style.font-size: 28",
+                "  style.bold: true",
+                "}",
+                "",
+            ]
+        elif not graph.nodes:
+            #: d2 silently writes nothing at all for a diagram with zero
+            #: shapes (no error, just no output file) -- an untitled empty
+            #: `RoutingGraph` would otherwise hit that with no node or title
+            #: to act as a shape, so give it an invisible placeholder.
+            lines += ['_empty_: "" { style.opacity: 0 }', ""]
+
+        for node in graph.nodes:
+            nid = _d2_id(node.id)
+            fill = _NODE_COLORS.get(node.kind, "#ffffff")
+            stroke = _NODE_STROKE_COLORS.get(node.kind, "#333333")
+            lines.append(f"{nid}: {{")
+            lines.append(f"  label: {_d2_label([_node_title(node), *node.detail])}")
+            lines.append(f'  style.fill: "{fill}"')
+            lines.append(f'  style.stroke: "{stroke}"')
+            lines.append("}")
+
+        for edge in graph.edges:
+            src = _d2_id(edge.source)
+            dst = _d2_id(edge.dest)
+            if edge.meta.get("kind") == "key":
+                label = f"KEY ({edge.meta['proc']})" if edge.meta.get("proc") else "KEY"
+                lines.append(f"{src} -> {dst}: {_d2_quoted(label)} {{")
+                lines.append(f'  style.stroke: "{_KEY_EDGE_COLOR}"')
+                lines.append(f'  style.font-color: "{_KEY_EDGE_COLOR}"')
+                lines.append("  style.stroke-dash: 4")
+                lines.append("}")
+                continue
+            parts = _edge_label_parts(edge)
+            if parts:
+                lines.append(f"{src} -> {dst}: {_d2_label(parts)}")
+            else:
+                lines.append(f"{src} -> {dst}")
+
+        return "\n".join(lines) + "\n"
+
+
+def _d2_id(node_id: NodeId) -> str:
+    return "n_" + "_".join(str(part) for part in node_id)
+
+
+def _d2_quoted(text: str) -> str:
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _d2_label(lines_list: list[str]) -> str:
+    """A D2 quoted-string label, `\\n`-joined when there's more than one
+    line. Unlike `MermaidRenderer`'s HTML labels, this stays a plain
+    rectangle -- D2's multi-line block-string syntax (`|...|`) renders as a
+    markdown/text shape instead, dropping the fill/stroke box entirely.
+
+    Each line is escaped on its own and *then* joined with a literal
+    `\\n` -- escaping the whole joined string first would double-escape
+    that separator's own backslash into a literal `\\n` in the output
+    rather than a line break."""
+    escaped = (line.replace("\\", "\\\\").replace('"', '\\"') for line in lines_list)
+    return '"' + "\\n".join(escaped) + '"'

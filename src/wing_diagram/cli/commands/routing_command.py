@@ -4,18 +4,19 @@ from pathlib import Path
 
 from .command import Command
 from ...propmap import PropMap, default_propmap_path
-from ...render import GraphvizRenderer, MermaidRenderer, Renderer
+from ...render import D2Renderer, GraphvizRenderer, MermaidRenderer, Renderer
 from ...routing import build_routing_graph
 from ...snapfile import load_snapshot
 
 log = getLogger(__name__)
 
 #: Default output path per `--renderer` choice, used when `--out` isn't
-#: given -- Graphviz renders straight to an image, Mermaid writes its own
-#: diagram source (see `MermaidRenderer`).
+#: given -- Graphviz and D2 render straight to an image, Mermaid writes its
+#: own diagram source (see `MermaidRenderer`).
 _DEFAULT_OUT_BY_RENDERER = {
     "graphviz": Path("routing.svg"),
     "mermaid": Path("routing.mmd"),
+    "d2": Path("routing.svg"),
 }
 
 
@@ -56,9 +57,11 @@ class RoutingCommand(Command):
         propmap = PropMap.load(args.propmap or default_propmap_path())
         graph = build_routing_graph(snapshot, propmap)
 
-        renderer: Renderer = (
-            GraphvizRenderer() if args.renderer == "graphviz" else MermaidRenderer()
-        )
+        renderer: Renderer = {
+            "graphviz": GraphvizRenderer,
+            "mermaid": MermaidRenderer,
+            "d2": D2Renderer,
+        }[args.renderer]()
         out = args.out or _DEFAULT_OUT_BY_RENDERER[args.renderer]
         title = args.title or args.snapfile.stem
         out_path = renderer.render(graph, out, title=title)

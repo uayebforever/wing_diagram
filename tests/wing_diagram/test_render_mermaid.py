@@ -160,11 +160,11 @@ def test_render_does_not_duplicate_bare_fallback_label(tmp_path: Path) -> None:
 
 
 def test_render_declares_nodes_in_the_graphs_given_order() -> None:
-    """Node *declaration* order is what `elk.forceNodeModelOrder` (see
-    `MermaidRenderer`) preserves as the final top-to-bottom layout order --
-    so `_build_mermaid` must declare nodes in `graph.nodes`' given order
-    (which `routing.build_routing_graph` already sorts ascending by index)
-    rather than reordering them itself."""
+    """Node *declaration* order is the starting point ELK's crossing-
+    minimization works from (see `MermaidRenderer`) -- so `_build_mermaid`
+    must declare nodes in `graph.nodes`' given order (which
+    `routing.build_routing_graph` already sorts ascending by index) rather
+    than reordering them itself."""
     graph = RoutingGraph(
         nodes=[
             Node(id=("ch", 1), kind="ch", label="Wren"),
@@ -183,19 +183,26 @@ def test_render_declares_nodes_in_the_graphs_given_order() -> None:
 
 
 def test_render_does_not_wrap_nodes_in_subgraphs() -> None:
-    """A Mermaid `subgraph` is its own nested ELK layout problem and was
-    observed to silently stop `forceNodeModelOrder` from applying to the
-    nodes inside it -- see `MermaidRenderer`'s docstring."""
+    """A Mermaid `subgraph` is its own nested ELK layout problem and stops
+    `_RANK_GROUPS` from influencing layer order across group boundaries --
+    see `MermaidRenderer`'s docstring."""
     content = MermaidRenderer()._build_mermaid(_sample_graph())
 
     assert "subgraph" not in content
 
 
-def test_render_sets_elk_model_order_options() -> None:
+def test_render_does_not_merge_edges_or_force_node_order() -> None:
+    """`elk.mergeEdges` bundles together any edges sharing a routing
+    channel, not just edges that share an endpoint -- in this graph's
+    dense many-to-many fan-in that made an unrelated channel's trunk look
+    like it fed a bus it never actually sends to. `forceNodeModelOrder`
+    is also left off so ELK's crossing-minimization has room to keep
+    independent edges apart -- see `MermaidRenderer`'s docstring."""
     content = MermaidRenderer()._build_mermaid(_sample_graph())
 
-    assert "forceNodeModelOrder: true" in content
-    assert "preset: modelOrder" in content
+    assert "mergeEdges: false" in content
+    assert "forceNodeModelOrder" not in content
+    assert "preset: modelOrder" not in content
 
 
 def test_render_includes_title_in_frontmatter_when_given() -> None:
