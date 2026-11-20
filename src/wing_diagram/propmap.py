@@ -36,6 +36,9 @@ class PropMapEntry:
     name: str
     longname: str | None = None
     items: tuple[EnumItem, ...] = ()
+    #: Physical unit (`"dB"`, `"Hz"`, ...) for a `"linear float"`/`"log
+    #: float"` entry, absent for every other type.
+    unit: str | None = None
 
     @property
     def display_name(self) -> str:
@@ -123,4 +126,5 @@ def _parse_entry(data: dict[str, Any]) -> PropMapEntry:
         name=name,
         longname=data.get("longname"),
         items=items,
+        unit=data.get("unit"),
     )
