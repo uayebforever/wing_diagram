@@ -234,3 +234,9 @@ def test_render_omits_title_css_when_not_given() -> None:
     content = MermaidRenderer()._build_mermaid(_sample_graph())
 
     assert "themeCSS" not in content
+
+
+def test_render_disables_edge_line_hops(tmp_path: Path) -> None:
+    out_path = MermaidRenderer().render(_sample_graph(), tmp_path / "diagram")
+
+    assert "lineHops: false" in out_path.read_text()
